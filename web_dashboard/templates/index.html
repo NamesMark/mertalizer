@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mertalizer - Music Structure Recognition</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/wavesurfer.js@7"></script>
+    <style>
+        .upload-area {
+            border: 2px dashed #dee2e6;
+            border-radius: 10px;
+            padding: 40px;
+            text-align: center;
+            transition: all 0.3s ease;
+            cursor: pointer;
+        }
+
+        .upload-area:hover {
+            border-color: #007bff;
+            background-color: #f8f9fa;
+        }
+
+        .upload-area.dragover {
+            border-color: #007bff;
+            background-color: #e3f2fd;
+        }
+
+        .segment-bar {
+            height: 30px;
+            margin: 2px 0;
+            border-radius: 5px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: bold;
+            font-size: 12px;
+        }
+
+        .segment-intro {
+            background-color: #ff6b6b;
+        }
+
+        .segment-verse {
+            background-color: #4ecdc4;
+        }
+
+        .segment-pre {
+            background-color: #45b7d1;
+        }
+
+        .segment-chorus {
+            background-color: #96ceb4;
+        }
+
+        .segment-bridge {
+            background-color: #feca57;
+        }
+
+        .segment-solo {
+            background-color: #ff9ff3;
+        }
+
+        .segment-outro {
+            background-color: #54a0ff;
+        }
+
+        .segment-other {
+            background-color: #6c757d;
+        }
+
+        .loading {
+            display: none;
+        }
+
+        .results {
+            display: none;
+        }
+
+        .waveform-container {
+            margin: 20px 0;
+            border: 1px solid #dee2e6;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+        <div class="container">
+            <a class="navbar-brand" href="#">
+                <i class="fas fa-music me-2"></i>Mertalizer
+            </a>
+            <span class="navbar-text">Music Structure Recognition</span>
+        </div>
+    </nav>
+
+    <div class="container mt-4">
+        <div class="row">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header">
+                        <h4><i class="fas fa-upload me-2"></i>Upload Audio File</h4>
+                    </div>
+                    <div class="card-body">
+                        <div class="upload-area" id="uploadArea">
+                            <i class="fas fa-cloud-upload-alt fa-3x text-muted mb-3"></i>
+                            <h5>Drag & Drop Audio File Here</h5>
+                            <p class="text-muted">or click to browse</p>
+                            <input type="file" id="audioFile" accept="audio/*" style="display: none;">
+                            <div class="mt-2">
+                                <small class="text-muted">Supported formats: WAV, MP3, FLAC, M4A</small>
+                            </div>
+                        </div>
+
+                        <div class="text-center mt-3" id="analyzeContainer" style="display:none;">
+                            <button class="btn btn-primary" id="analyzeButton">
+                                <i class="fas fa-play me-2"></i>Analyze Structure
+                            </button>
+                        </div>
+
+                        <div class="loading text-center mt-4" id="loading">
+                            <div class="spinner-border text-primary" role="status">
+                                <span class="visually-hidden">Loading...</span>
+                            </div>
+                            <p class="mt-2">Analyzing audio structure...</p>
+                        </div>
+
+                        <div class="results mt-4" id="results">
+                            <div class="row">
+                                <div class="col-md-8">
+                                    <h5><i class="fas fa-waveform me-2"></i>Audio Waveform</h5>
+                                    <div class="waveform-container">
+                                        <div id="waveform"></div>
+                                    </div>
+
+                                    <h5 class="mt-4"><i class="fas fa-chart-bar me-2"></i>Structure Analysis</h5>
+                                    <canvas id="structureChart" height="220"></canvas>
+                                </div>
+
+                                <div class="col-md-4">
+                                    <h5><i class="fas fa-list me-2"></i>Segments</h5>
+                                    <div id="segmentsList"></div>
+
+                                    <h5 class="mt-4"><i class="fas fa-info-circle me-2"></i>Track Info</h5>
+                                    <div id="trackInfo"></div>
+
+                                    <div id="boundaryList" class="mt-3"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let wavesurfer;
+        let structureChartInstance = null;
+        let currentAudioFile = null;
+
+        // Initialize upload area
+        const uploadArea = document.getElementById('uploadArea');
+        const audioFileInput = document.getElementById('audioFile');
+        const loading = document.getElementById('loading');
+        const results = document.getElementById('results');
+        const analyzeContainer = document.getElementById('analyzeContainer');
+        const analyzeButton = document.getElementById('analyzeButton');
+
+        uploadArea.addEventListener('click', () => audioFileInput.click());
+        uploadArea.addEventListener('dragover', handleDragOver);
+        uploadArea.addEventListener('dragleave', handleDragLeave);
+        uploadArea.addEventListener('drop', handleDrop);
+        audioFileInput.addEventListener('change', handleFileSelect);
+
+        function handleDragOver(e) {
+            e.preventDefault();
+            uploadArea.classList.add('dragover');
+        }
+
+        function handleDragLeave(e) {
+            e.preventDefault();
+            uploadArea.classList.remove('dragover');
+        }
+
+        function handleDrop(e) {
+            e.preventDefault();
+            uploadArea.classList.remove('dragover');
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                processFile(files[0]);
+            }
+        }
+
+        function handleFileSelect(e) {
+            const file = e.target.files[0];
+            if (file) {
+                processFile(file);
+            }
+        }
+
+        function processFile(file) {
+            if (!file.type.startsWith('audio/')) {
+                alert('Please select an audio file.');
+                return;
+            }
+
+            currentAudioFile = file;
+            results.style.display = 'none';
+            analyzeButton.disabled = false;
+            uploadArea.innerHTML = `
+                <i class="fas fa-file-audio fa-3x text-success mb-3"></i>
+                <h5>${file.name}</h5>
+                <p class="text-muted">Ready to analyze</p>
+            `;
+
+            analyzeContainer.style.display = 'block';
+        }
+
+        analyzeButton.addEventListener('click', analyzeAudio);
+
+        async function analyzeAudio() {
+            if (!currentAudioFile) return;
+
+            loading.style.display = 'block';
+            results.style.display = 'none';
+            analyzeButton.disabled = true;
+
+            const formData = new FormData();
+            formData.append('audio_file', currentAudioFile);
+
+            try {
+                const response = await fetch('/api/predict', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    let message = 'Analysis failed';
+                    try {
+                        const errJson = await response.json();
+                        if (errJson?.error) {
+                            message = `${errJson.error}${errJson.detail ? `: ${errJson.detail}` : ''}`;
+                        }
+                    } catch (jsonErr) {
+                        const fallback = await response.text();
+                        if (fallback) {
+                            message = fallback;
+                        }
+                    }
+                    throw new Error(message);
+                }
+
+                const result = await response.json();
+                displayResults(result);
+            } catch (error) {
+                console.error('Error:', error);
+                alert(error?.message || 'Analysis failed. Please try again.');
+            } finally {
+                loading.style.display = 'none';
+                analyzeButton.disabled = false;
+            }
+        }
+
+        function displayResults(result) {
+            results.style.display = 'block';
+
+            // Display track info
+            document.getElementById('trackInfo').innerHTML = `
+                <div class="card">
+                    <div class="card-body">
+                        <p><strong>Track ID:</strong> ${result.track_id}</p>
+                        <p><strong>Duration:</strong> ${result.duration.toFixed(2)}s</p>
+                        <p><strong>Sample Rate:</strong> ${result.sr} Hz</p>
+                        <p><strong>Segments:</strong> ${result.segments.length}</p>
+                        <p><strong>Boundaries:</strong> ${result.boundaries.length}</p>
+                        <p><strong>Beats:</strong> ${Array.isArray(result.beats) ? result.beats.length : 0}</p>
+                    </div>
+                </div>
+            `;
+
+            // Display segments
+            const segmentsList = document.getElementById('segmentsList');
+            segmentsList.innerHTML = '';
+            result.segments.forEach((segment, index) => {
+                const segmentDiv = document.createElement('div');
+                const segmentClass = segment.label
+                    .toLowerCase()
+                    .replace(/[^a-z0-9]/g, '');
+                segmentDiv.className = `segment-bar segment-${segmentClass}`;
+                segmentDiv.innerHTML = `
+                    <div class="d-flex justify-content-between w-100 px-2">
+                        <span>${segment.label}</span>
+                        <span>${segment.start.toFixed(1)}s - ${segment.end.toFixed(1)}s</span>
+                    </div>
+                `;
+                segmentsList.appendChild(segmentDiv);
+            });
+
+            // Initialize waveform
+            initializeWaveform(result);
+
+            // Create structure chart
+            createStructureChart(result);
+
+            // Render boundaries list
+            renderBoundaryList(result);
+        }
+
+        function initializeWaveform(result) {
+            if (wavesurfer) {
+                wavesurfer.destroy();
+            }
+
+            wavesurfer = WaveSurfer.create({
+                container: '#waveform',
+                waveColor: '#4f46e5',
+                progressColor: '#7c3aed',
+                height: 100,
+                normalize: true
+            });
+
+            // Load audio file
+            const audioUrl = URL.createObjectURL(currentAudioFile);
+            wavesurfer.load(audioUrl);
+
+            // Add segment markers
+            wavesurfer.on('ready', () => {
+                const maxMarkers = 200;
+                const boundaries = dedupeSorted(result.boundaries || []);
+                const stride = Math.max(1, Math.floor(boundaries.length / maxMarkers));
+
+                boundaries.forEach((boundary, index) => {
+                    if (index % stride !== 0) return;
+                    wavesurfer.addMarker({
+                        time: boundary,
+                        color: '#ff6b6b',
+                        position: 'top'
+                    });
+                });
+
+                if (Array.isArray(result.beats)) {
+                    const beatStride = Math.max(1, Math.floor(result.beats.length / maxMarkers));
+                    result.beats.forEach((beat, idx) => {
+                        if (idx % beatStride !== 0) return;
+                        wavesurfer.addMarker({
+                            time: beat,
+                            color: '#00b894',
+                            position: 'bottom'
+                        });
+                    });
+                }
+            });
+        }
+
+        function createStructureChart(result) {
+            const canvas = document.getElementById('structureChart');
+            const ctx = canvas.getContext('2d');
+
+            if (structureChartInstance) {
+                structureChartInstance.destroy();
+            }
+
+            // Count segment types
+            const segmentCounts = {};
+            result.segments.forEach(segment => {
+                segmentCounts[segment.label] = (segmentCounts[segment.label] || 0) + 1;
+            });
+
+            structureChartInstance = new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    labels: Object.keys(segmentCounts),
+                    datasets: [{
+                        data: Object.values(segmentCounts),
+                        backgroundColor: [
+                            '#ff6b6b', '#4ecdc4', '#45b7d1', '#96ceb4',
+                            '#feca57', '#ff9ff3', '#54a0ff', '#6c757d'
+                        ]
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        legend: {
+                            position: 'bottom'
+                        }
+                    }
+                }
+            });
+        }
+
+        function renderBoundaryList(result) {
+            const container = document.getElementById('boundaryList');
+            if (!container) return;
+
+            const boundaries = dedupeSorted(result.boundaries || []);
+            const listItems = boundaries.slice(0, 100).map(b => `<li>${b.toFixed(2)} s</li>`).join('');
+            container.innerHTML = `
+                <div class="card mt-3">
+                    <div class="card-header">
+                        <strong>First ${Math.min(boundaries.length, 100)} Boundaries</strong>
+                    </div>
+                    <div class="card-body" style="max-height:200px; overflow:auto;">
+                        <ul class="mb-0 small">${listItems || '<li>No boundaries detected</li>'}</ul>
+                    </div>
+                </div>
+            `;
+        }
+
+        function dedupeSorted(arr) {
+            if (!Array.isArray(arr)) return [];
+            const rounded = arr.map(v => Number.parseFloat(v)).filter(Number.isFinite);
+            rounded.sort((a, b) => a - b);
+
+            const unique = [];
+            let prev = null;
+            rounded.forEach(value => {
+                if (prev === null || Math.abs(value - prev) > 1e-3) {
+                    unique.push(value);
+                    prev = value;
+                }
+            });
+            return unique;
+        }
+    </script>
+</body>
+
+</html>

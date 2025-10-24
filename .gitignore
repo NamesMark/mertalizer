@@ -1,0 +1,38 @@
+# Python caches and build artifacts
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+*.log
+nohup.out
+
+# Virtual environments
+.venv/
+venv/
+
+# Environment & secrets
+.env
+
+# Generated datasets and embeddings
+data/
+uploads/
+
+# Model checkpoints and exported artifacts
+models/
+*.ckpt
+*.pt
+*.onnx
+*.npz
+
+# Training / evaluation outputs
+logs/
+runs/
+*.tensorboard
+
+# Audio artefacts
+*.wav
+*.mp3
+*.flac
+
+# Misc
+.DS_Store

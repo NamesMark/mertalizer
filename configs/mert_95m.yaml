@@ -1,0 +1,49 @@
+# Model configuration
+model:
+  encoder_model: "mert"
+  encoder_frozen: true
+  encoder_lr: 1e-5
+  boundary_head_type: "tcn"
+  boundary_hidden_dim: 256
+  boundary_num_layers: 4
+  boundary_dropout: 0.1
+  boundary_kernel_size: 3
+  boundary_dilation_base: 2
+  transformer_num_heads: 8
+  transformer_num_layers: 2
+  label_hidden_dim: 128
+  num_labels: 8
+  boundary_loss_weight: 1.0
+  label_loss_weight: 1.0
+  focal_gamma: 2.0
+  learning_rate: 0.0002
+  weight_decay: 0.01
+  embedding_dim: 768
+
+# Data settings
+data_dir: "data/processed"
+batch_size: 8
+max_epochs: 100
+num_workers: 4
+
+# Training settings
+learning_rate: 0.0002
+weight_decay: 0.01
+gradient_clip_val: 1.0
+
+# Validation settings
+val_check_interval: 0.25
+early_stopping_patience: 10
+
+# Logging settings
+use_wandb: true
+project_name: "mertalizer"
+experiment_name: "mert-95m-tcn-crf"
+
+# Checkpoint settings
+checkpoint_dir: "models/checkpoints"
+save_top_k: 3
+
+# Audio settings
+target_sr: 22050
+max_audio_length: 600.0

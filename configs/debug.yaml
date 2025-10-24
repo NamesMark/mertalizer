@@ -1,0 +1,36 @@
+model:
+  encoder_model: "mert"
+  encoder_frozen: true
+  boundary_head_type: "tcn"
+  boundary_hidden_dim: 128
+  boundary_num_layers: 2
+  boundary_dropout: 0.1
+  boundary_kernel_size: 3
+  boundary_dilation_base: 2
+  transformer_num_heads: 4
+  transformer_num_layers: 2
+  label_hidden_dim: 64
+  num_labels: 8
+  boundary_loss_weight: 1.0
+  label_loss_weight: 1.0
+  focal_gamma: 0.0
+  learning_rate: 0.0002
+  weight_decay: 0.01
+  embedding_dim: 768
+
+data_dir: "data/processed"
+batch_size: 1
+max_epochs: 1
+num_workers: 0
+learning_rate: 0.0002
+weight_decay: 0.01
+gradient_clip_val: 1.0
+val_check_interval: 1.0
+early_stopping_patience: 1
+use_wandb: false
+checkpoint_dir: "models/debug"
+save_top_k: 1
+target_sr: 24000
+max_audio_length: 600.0
+monitor_metric: "train/total_loss"
+monitor_mode: "min"
