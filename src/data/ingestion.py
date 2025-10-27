@@ -15,7 +15,10 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from .ontology import LabelMapper, map_labels
+try:  # pragma: no cover - support both package and script execution
+    from .ontology import LabelMapper, map_labels
+except ImportError:  # When running as a script (python src/data/ingestion.py)
+    from data.ontology import LabelMapper, map_labels
 
 logger = logging.getLogger(__name__)
 

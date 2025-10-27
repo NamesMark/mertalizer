@@ -436,15 +436,25 @@ class MusicStructureModel(pl.LightningModule):
         frame_times: np.ndarray,
         threshold: float = 0.5,
         mask: Optional[torch.Tensor] = None,
+        boundary_logits: Optional[torch.Tensor] = None,
+        smooth: bool = True,
+        smoothing_window: int = 5,
+        min_gap_seconds: float = 0.0,
+        prominence: Optional[float] = None,
     ) -> List[float]:
         """Predict boundary times from embeddings."""
         self.eval()
         with torch.no_grad():
-            outputs = self.forward(embeddings)
-            boundary_probs = torch.sigmoid(outputs["boundary_logits"])
+            if boundary_logits is None:
+                outputs = self.forward(embeddings)
+                boundary_logits = outputs["boundary_logits"]
+
+            boundary_probs = torch.sigmoid(boundary_logits)
 
             if boundary_probs.dim() == 2:
                 boundary_probs = boundary_probs.squeeze(0)
+            if boundary_probs.dim() == 3:
+                boundary_probs = boundary_probs.squeeze(-1)
 
             if mask is not None:
                 boundary_probs = boundary_probs.masked_fill(~mask, 0.0)
@@ -452,20 +462,52 @@ class MusicStructureModel(pl.LightningModule):
             prob_numpy = boundary_probs.detach().cpu().numpy().astype(np.float32)
             prob_numpy = np.reshape(prob_numpy, (-1,))
 
+            if prob_numpy.size == 0:
+                return []
+
+            if smooth and smoothing_window > 1:
+                window = max(1, int(smoothing_window))
+                window = min(window, prob_numpy.size)
+                if window % 2 == 0:
+                    window = max(1, window - 1)
+                if window > 1:
+                    kernel = np.ones(window, dtype=np.float32)
+                    kernel /= kernel.sum()
+                    prob_numpy = np.convolve(prob_numpy, kernel, mode="same")
+
             if len(frame_times) > 1:
-                frame_step = max(frame_times[1] - frame_times[0], 1e-3)
+                frame_step = max(float(frame_times[1] - frame_times[0]), 1e-6)
             else:
                 frame_step = 1.0
-            min_spacing_seconds = 1.0
-            distance = max(1, int(min_spacing_seconds / frame_step))
 
-            peak_indices, _ = find_peaks(
-                prob_numpy, height=threshold, distance=distance
-            )
-            boundary_indices = peak_indices
+            if min_gap_seconds and min_gap_seconds > 0:
+                distance = max(1, int(min_gap_seconds / frame_step))
+            else:
+                distance = 1
 
-            boundary_times = frame_times[boundary_indices]
-            return boundary_times.tolist()
+            peak_kwargs: Dict[str, Any] = {
+                "height": threshold,
+                "distance": distance,
+            }
+            if prominence is not None:
+                peak_kwargs["prominence"] = max(0.0, float(prominence))
+
+            peak_indices, _ = find_peaks(prob_numpy, **peak_kwargs)
+            boundary_times = frame_times[peak_indices]
+
+            if boundary_times.size == 0:
+                return []
+
+            filtered: List[float] = []
+            min_separation = max(min_gap_seconds or 0.0, frame_step)
+            last_time = -float("inf")
+            for t in boundary_times:
+                t_float = float(t)
+                if t_float - last_time >= min_separation:
+                    filtered.append(t_float)
+                    last_time = t_float
+
+            return filtered
 
     def predict_labels(
         self,
@@ -473,12 +515,16 @@ class MusicStructureModel(pl.LightningModule):
         frame_times: np.ndarray,
         boundaries: List[float],
         mask: Optional[torch.Tensor] = None,
+        label_logits: Optional[torch.Tensor] = None,
+        position_bias: bool = True,
+        min_segment_seconds: float = 0.0,
     ) -> List[str]:
         """Predict labels for segments defined by boundaries."""
         self.eval()
         with torch.no_grad():
-            outputs = self.forward(embeddings)
-            label_logits = outputs["label_logits"]
+            if label_logits is None:
+                outputs = self.forward(embeddings)
+                label_logits = outputs["label_logits"]
 
             if label_logits.dim() == 3:
                 label_logits = label_logits.squeeze(0)
@@ -494,6 +540,7 @@ class MusicStructureModel(pl.LightningModule):
                 "OUTRO",
                 "OTHER",
             ]
+            label_to_idx = {name: idx for idx, name in enumerate(label_names)}
 
             if not boundaries:
                 return labels
@@ -501,10 +548,62 @@ class MusicStructureModel(pl.LightningModule):
             boundary_frames = np.searchsorted(frame_times, boundaries, side="left")
             boundary_frames = np.clip(boundary_frames, 0, len(frame_times) - 1)
 
+            if len(frame_times) > 0:
+                total_duration = float(frame_times[-1])
+            elif boundaries:
+                total_duration = float(boundaries[-1])
+            else:
+                total_duration = 0.0
+
             for start_frame, end_frame in zip(boundary_frames[:-1], boundary_frames[1:]):
                 end_frame = max(end_frame, start_frame + 1)
                 segment_logits = label_logits[start_frame:end_frame]
-                predicted_label = torch.argmax(segment_logits.mean(dim=0)).item()
+                avg_logits = segment_logits.mean(dim=0)
+
+                start_time = (
+                    frame_times[start_frame]
+                    if len(frame_times) > start_frame
+                    else float(start_frame)
+                )
+                end_time = (
+                    frame_times[end_frame]
+                    if len(frame_times) > end_frame
+                    else float(end_frame)
+                )
+                segment_duration = float(end_time - start_time)
+
+                if min_segment_seconds > 0 and segment_duration < min_segment_seconds and labels:
+                    labels.append(labels[-1])
+                    continue
+
+                if position_bias and total_duration > 0:
+                    center = float((start_time + end_time) / 2.0) / total_duration
+                    bias = torch.zeros_like(avg_logits)
+
+                    intro_idx = label_to_idx.get("INTRO")
+                    outro_idx = label_to_idx.get("OUTRO")
+                    chorus_idx = label_to_idx.get("CHORUS")
+                    verse_idx = label_to_idx.get("VERSE")
+                    pre_idx = label_to_idx.get("PRE")
+
+                    if intro_idx is not None and center < 0.15:
+                        bias[intro_idx] += 0.6
+                        if outro_idx is not None:
+                            bias[outro_idx] -= 0.3
+                    if outro_idx is not None and center > 0.85:
+                        bias[outro_idx] += 0.6
+                        if intro_idx is not None:
+                            bias[intro_idx] -= 0.3
+                    if chorus_idx is not None and 0.3 <= center <= 0.6:
+                        bias[chorus_idx] += 0.35
+                    if verse_idx is not None and 0.15 <= center <= 0.45:
+                        bias[verse_idx] += 0.2
+                    if pre_idx is not None and 0.2 <= center <= 0.35:
+                        bias[pre_idx] += 0.2
+
+                    avg_logits = avg_logits + bias
+
+                predicted_label = torch.argmax(avg_logits).item()
                 labels.append(label_names[predicted_label])
 
             return labels

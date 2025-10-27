@@ -9,6 +9,7 @@
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/wavesurfer.js@7"></script>
+    <script src="https://cdn.jsdelivr.net/npm/wavesurfer.js@7/dist/plugins/markers.min.js"></script>
     <style>
         .upload-area {
             border: 2px dashed #dee2e6;
@@ -86,6 +87,39 @@
             border: 1px solid #dee2e6;
             border-radius: 5px;
         }
+
+        #overlayWaveform,
+        #waveform {
+            position: relative;
+        }
+
+        .marker-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            pointer-events: none;
+        }
+
+        .marker-line {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            width: 2px;
+            transform: translateX(-50%);
+            opacity: 0.85;
+        }
+
+        .marker-boundary {
+            background-color: #ff6b6b;
+        }
+
+        .marker-beat {
+            background-color: #00b894;
+            opacity: 0.4;
+            width: 1px;
+        }
     </style>
 </head>
 
@@ -117,11 +151,27 @@
                             </div>
                         </div>
 
+                        <div class="mt-3" id="thresholdControls" style="display:none;">
+                            <label class="form-label">
+                                Boundary Threshold: <span id="thresholdValue">0.10</span>
+                            </label>
+                            <input type="range" class="form-range" id="thresholdSlider" min="0.01" max="0.60" step="0.01" value="0.10">
+                        </div>
+
+                        <div class="mt-3" id="smoothingControls" style="display:none;">
+                            <label class="form-label">
+                                Smoothing Window (1 = off): <span id="smoothingValue">1</span>
+                            </label>
+                            <input type="range" class="form-range" id="smoothingSlider" min="1" max="15" step="1" value="1">
+                        </div>
+
                         <div class="text-center mt-3" id="analyzeContainer" style="display:none;">
                             <button class="btn btn-primary" id="analyzeButton">
                                 <i class="fas fa-play me-2"></i>Analyze Structure
                             </button>
                         </div>
+
+                        <audio id="audioPlayer" controls class="w-100 mt-3"></audio>
 
                         <div class="loading text-center mt-4" id="loading">
                             <div class="spinner-border text-primary" role="status">
@@ -140,6 +190,11 @@
 
                                     <h5 class="mt-4"><i class="fas fa-chart-bar me-2"></i>Structure Analysis</h5>
                                     <canvas id="structureChart" height="220"></canvas>
+
+                                    <h5 class="mt-4"><i class="fas fa-waveform me-2"></i>Boundary / Beat Overlay</h5>
+                                    <div class="waveform-container">
+                                        <div id="overlayWaveform"></div>
+                                    </div>
                                 </div>
 
                                 <div class="col-md-4">
@@ -150,6 +205,7 @@
                                     <div id="trackInfo"></div>
 
                                     <div id="boundaryList" class="mt-3"></div>
+                                    <div id="debugInfo" class="mt-3"></div>
                                 </div>
                             </div>
                         </div>
@@ -159,8 +215,27 @@
         </div>
     </div>
 
+    <div class="container mt-4">
+        <div class="row">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0"><i class="fas fa-history me-2"></i>Saved Analyses</h5>
+                        <button class="btn btn-sm btn-outline-secondary" id="refreshHistoryButton">
+                            <i class="fas fa-rotate-right me-1"></i>Refresh
+                        </button>
+                    </div>
+                    <div class="card-body" id="historyList">
+                        <small class="text-muted">No analyses saved yet.</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script>
         let wavesurfer;
+        let overlayWaveSurfer;
         let structureChartInstance = null;
         let currentAudioFile = null;
 
@@ -171,6 +246,35 @@
         const results = document.getElementById('results');
         const analyzeContainer = document.getElementById('analyzeContainer');
         const analyzeButton = document.getElementById('analyzeButton');
+        const thresholdSlider = document.getElementById('thresholdSlider');
+        const thresholdValue = document.getElementById('thresholdValue');
+        const thresholdControls = document.getElementById('thresholdControls');
+        const smoothingSlider = document.getElementById('smoothingSlider');
+        const smoothingValue = document.getElementById('smoothingValue');
+        const smoothingControls = document.getElementById('smoothingControls');
+        const audioPlayer = document.getElementById('audioPlayer');
+        const POSITION_BIAS_DEFAULT = true;
+        const MIN_SEGMENT_DEFAULT = 1.5;
+        const MIN_GAP_DEFAULT = 3.0;
+        let currentThreshold = 0.1;
+        let currentSmoothingWindow = 1;
+        let currentMinSegment = MIN_SEGMENT_DEFAULT;
+        let currentPositionBias = POSITION_BIAS_DEFAULT;
+        let currentMinGap = MIN_GAP_DEFAULT;
+        let currentAudioUrl = null;
+        let overlayMarkerLayer = null;
+        if (thresholdValue) {
+            thresholdValue.textContent = currentThreshold.toFixed(2);
+        }
+        if (thresholdSlider) {
+            thresholdSlider.value = currentThreshold.toFixed(2);
+        }
+        if (smoothingValue) {
+            smoothingValue.textContent = currentSmoothingWindow.toFixed(0);
+        }
+        if (smoothingSlider) {
+            smoothingSlider.value = currentSmoothingWindow.toFixed(0);
+        }
 
         uploadArea.addEventListener('click', () => audioFileInput.click());
         uploadArea.addEventListener('dragover', handleDragOver);
@@ -211,18 +315,84 @@
             }
 
             currentAudioFile = file;
+            currentMinGap = MIN_GAP_DEFAULT;
+            currentMinSegment = MIN_SEGMENT_DEFAULT;
+            currentPositionBias = POSITION_BIAS_DEFAULT;
             results.style.display = 'none';
             analyzeButton.disabled = false;
+            if (currentAudioUrl) {
+                URL.revokeObjectURL(currentAudioUrl);
+            }
+
+            currentAudioUrl = URL.createObjectURL(file);
+
             uploadArea.innerHTML = `
                 <i class="fas fa-file-audio fa-3x text-success mb-3"></i>
                 <h5>${file.name}</h5>
                 <p class="text-muted">Ready to analyze</p>
             `;
 
+            audioPlayer.src = currentAudioUrl;
+            audioPlayer.load();
+            audioPlayer.pause();
+            audioPlayer.currentTime = 0;
+
+            thresholdControls.style.display = 'block';
+            if (thresholdSlider) {
+                thresholdSlider.value = currentThreshold.toFixed(2);
+            }
+            if (thresholdValue) {
+                thresholdValue.textContent = currentThreshold.toFixed(2);
+            }
+            smoothingControls.style.display = 'block';
+            if (smoothingSlider) {
+                smoothingSlider.value = currentSmoothingWindow.toFixed(0);
+            }
+            if (smoothingValue) {
+                smoothingValue.textContent = currentSmoothingWindow.toFixed(0);
+            }
             analyzeContainer.style.display = 'block';
         }
 
         analyzeButton.addEventListener('click', analyzeAudio);
+        if (thresholdSlider) {
+            thresholdSlider.addEventListener('input', (event) => {
+                currentThreshold = parseFloat(event.target.value);
+                if (thresholdValue) {
+                    thresholdValue.textContent = currentThreshold.toFixed(2);
+                }
+            });
+        }
+        if (smoothingSlider) {
+            smoothingSlider.addEventListener('input', (event) => {
+                currentSmoothingWindow = parseInt(event.target.value, 10) || 1;
+                if (smoothingValue) {
+                    smoothingValue.textContent = currentSmoothingWindow.toFixed(0);
+                }
+            });
+        }
+
+        const syncOverlayToAudio = () => {
+            if (!overlayWaveSurfer || !audioPlayer.duration) return;
+            const progress = audioPlayer.currentTime / audioPlayer.duration;
+            overlayWaveSurfer.seekTo(progress);
+            if (wavesurfer && Math.abs(wavesurfer.getCurrentTime() - audioPlayer.currentTime) > 0.05) {
+                wavesurfer.seekTo(progress);
+            }
+        };
+
+        audioPlayer.addEventListener('timeupdate', syncOverlayToAudio);
+        audioPlayer.addEventListener('seeking', syncOverlayToAudio);
+        audioPlayer.addEventListener('play', () => {
+            if (wavesurfer && !wavesurfer.isPlaying()) {
+                wavesurfer.play();
+            }
+        });
+        audioPlayer.addEventListener('pause', () => {
+            if (wavesurfer && wavesurfer.isPlaying()) {
+                wavesurfer.pause();
+            }
+        });
 
         async function analyzeAudio() {
             if (!currentAudioFile) return;
@@ -233,7 +403,13 @@
 
             const formData = new FormData();
             formData.append('audio_file', currentAudioFile);
-
+            formData.append('threshold', currentThreshold);
+            formData.append('smooth', currentSmoothingWindow > 1 ? 'true' : 'false');
+            formData.append('smoothing_window', currentSmoothingWindow);
+            formData.append('min_gap', currentMinGap);
+            formData.append('min_segment', currentMinSegment);
+            formData.append('position_bias', currentPositionBias ? 'true' : 'false');
+            
             try {
                 const response = await fetch('/api/predict', {
                     method: 'POST',
@@ -270,6 +446,40 @@
         function displayResults(result) {
             results.style.display = 'block';
 
+            const usedThreshold = result.threshold ?? currentThreshold;
+            currentThreshold = usedThreshold;
+            if (thresholdSlider) {
+                thresholdSlider.value = currentThreshold.toFixed(2);
+            }
+            if (thresholdValue) {
+                thresholdValue.textContent = currentThreshold.toFixed(2);
+            }
+            if (typeof result.smoothing_window === 'number') {
+                currentSmoothingWindow = result.smoothing_window;
+            }
+            if (smoothingSlider) {
+                smoothingSlider.value = currentSmoothingWindow.toFixed(0);
+            }
+            if (smoothingValue) {
+                smoothingValue.textContent = currentSmoothingWindow.toFixed(0);
+            }
+            if (typeof result.min_segment_seconds === 'number') {
+                currentMinSegment = result.min_segment_seconds;
+            }
+            if (typeof result.position_bias === 'boolean') {
+                currentPositionBias = result.position_bias;
+            }
+            if (typeof result.min_gap_seconds === 'number') {
+                currentMinGap = result.min_gap_seconds;
+            }
+
+            if (currentAudioUrl) {
+                audioPlayer.src = currentAudioUrl;
+                audioPlayer.load();
+                audioPlayer.pause();
+                audioPlayer.currentTime = 0;
+            }
+
             // Display track info
             document.getElementById('trackInfo').innerHTML = `
                 <div class="card">
@@ -277,6 +487,13 @@
                         <p><strong>Track ID:</strong> ${result.track_id}</p>
                         <p><strong>Duration:</strong> ${result.duration.toFixed(2)}s</p>
                         <p><strong>Sample Rate:</strong> ${result.sr} Hz</p>
+                        <p><strong>Threshold:</strong> ${(result.threshold ?? currentThreshold).toFixed(2)}</p>
+                        <p><strong>Smoothing:</strong> ${(result.smooth ?? (currentSmoothingWindow > 1)) ? 'On' : 'Off'}</p>
+                        <p><strong>Min Segment:</strong> ${(result.min_segment_seconds ?? currentMinSegment).toFixed(2)} s</p>
+                        <p><strong>Position Bias:</strong> ${(result.position_bias ?? currentPositionBias) ? 'On' : 'Off'}</p>
+                        <p><strong>Min Gap:</strong> ${(result.min_gap_seconds ?? currentMinGap).toFixed(2)} s</p>
+                        <p><strong>BPM:</strong> ${formatBPM(result.beats, result.duration)}</p>
+                        <p><strong>Smoothing Window:</strong> ${result.smoothing_window ?? currentSmoothingWindow}</p>
                         <p><strong>Segments:</strong> ${result.segments.length}</p>
                         <p><strong>Boundaries:</strong> ${result.boundaries.length}</p>
                         <p><strong>Beats:</strong> ${Array.isArray(result.beats) ? result.beats.length : 0}</p>
@@ -310,6 +527,9 @@
 
             // Render boundaries list
             renderBoundaryList(result);
+            renderDebugInfo(result.debug);
+            console.info('Prediction debug info:', result.debug);
+            refreshHistory();
         }
 
         function initializeWaveform(result) {
@@ -317,44 +537,77 @@
                 wavesurfer.destroy();
             }
 
+            if (overlayWaveSurfer) {
+                overlayWaveSurfer.destroy();
+            }
+
+            if (overlayMarkerLayer && overlayMarkerLayer.parentNode) {
+                overlayMarkerLayer.parentNode.removeChild(overlayMarkerLayer);
+            }
+            overlayMarkerLayer = null;
+
             wavesurfer = WaveSurfer.create({
                 container: '#waveform',
                 waveColor: '#4f46e5',
                 progressColor: '#7c3aed',
                 height: 100,
-                normalize: true
+                normalize: true,
+                backend: 'MediaElement',
+                media: audioPlayer,
             });
 
-            // Load audio file
-            const audioUrl = URL.createObjectURL(currentAudioFile);
-            wavesurfer.load(audioUrl);
+            overlayWaveSurfer = WaveSurfer.create({
+                container: '#overlayWaveform',
+                waveColor: '#dfe6e9',
+                progressColor: '#b2bec3',
+                cursorColor: '#ff6b6b',
+                height: 60,
+                interact: false,
+                normalize: true,
+            });
 
-            // Add segment markers
+            const markersConfig = {
+                boundaries: dedupeSorted(result.boundaries || []),
+                beats: Array.isArray(result.beats) ? result.beats : [],
+            };
+
+            const maxMarkers = 200;
+            const boundaryStride = Math.max(1, Math.floor(markersConfig.boundaries.length / maxMarkers));
+            const beatStride = Math.max(1, Math.floor(markersConfig.beats.length / maxMarkers));
+
+            const audioUrl = currentAudioUrl || URL.createObjectURL(currentAudioFile);
+            if (!currentAudioUrl) {
+                currentAudioUrl = audioUrl;
+                audioPlayer.src = currentAudioUrl;
+                audioPlayer.load();
+            }
+
+            wavesurfer.load(audioPlayer);
+            overlayWaveSurfer.load(audioUrl);
+
             wavesurfer.on('ready', () => {
-                const maxMarkers = 200;
-                const boundaries = dedupeSorted(result.boundaries || []);
-                const stride = Math.max(1, Math.floor(boundaries.length / maxMarkers));
+                renderOverlayMarkers(markersConfig.boundaries, markersConfig.beats, boundaryStride, beatStride);
+            });
 
-                boundaries.forEach((boundary, index) => {
-                    if (index % stride !== 0) return;
-                    wavesurfer.addMarker({
-                        time: boundary,
-                        color: '#ff6b6b',
-                        position: 'top'
-                    });
-                });
+            overlayWaveSurfer.on('ready', () => {
+                renderOverlayMarkers(markersConfig.boundaries, markersConfig.beats, boundaryStride, beatStride);
+                overlayWaveSurfer.seekTo(0);
+            });
 
-                if (Array.isArray(result.beats)) {
-                    const beatStride = Math.max(1, Math.floor(result.beats.length / maxMarkers));
-                    result.beats.forEach((beat, idx) => {
-                        if (idx % beatStride !== 0) return;
-                        wavesurfer.addMarker({
-                            time: beat,
-                            color: '#00b894',
-                            position: 'bottom'
-                        });
-                    });
-                }
+            wavesurfer.on('audioprocess', () => {
+                if (!overlayWaveSurfer || !wavesurfer.getDuration()) return;
+                const progress = wavesurfer.getCurrentTime() / wavesurfer.getDuration();
+                overlayWaveSurfer.seekTo(progress);
+            });
+
+            wavesurfer.on('seek', (progress) => {
+                if (!overlayWaveSurfer) return;
+                overlayWaveSurfer.seekTo(progress);
+            });
+
+            wavesurfer.on('finish', () => {
+                if (!overlayWaveSurfer) return;
+                overlayWaveSurfer.seekTo(1);
             });
         }
 
@@ -413,6 +666,80 @@
             `;
         }
 
+        function renderDebugInfo(debug) {
+            const container = document.getElementById('debugInfo');
+            if (!container) return;
+
+            if (!debug) {
+                container.innerHTML = '';
+                return;
+            }
+
+            const peaks = (debug.top_boundary_peaks || [])
+                .map(peak => `<li>${peak.time.toFixed(2)}s → ${peak.prob.toFixed(3)}</li>`)
+                .join('');
+
+            const minGap = typeof debug.min_gap_seconds === 'number'
+                ? debug.min_gap_seconds.toFixed(2)
+                : '—';
+            const minSegment = typeof debug.min_segment_seconds === 'number'
+                ? debug.min_segment_seconds.toFixed(2)
+                : '—';
+            const smoothingWindow = debug.smoothing_window ?? '—';
+
+            container.innerHTML = `
+                <div class="card">
+                    <div class="card-header">
+                        <strong>Boundary Debug</strong>
+                    </div>
+                    <div class="card-body small">
+                        <p class="mb-1">Max: ${debug.max_boundary_prob.toFixed(3)}</p>
+                        <p class="mb-1">Mean: ${debug.mean_boundary_prob.toFixed(3)}</p>
+                        <p class="mb-1">Min: ${debug.min_boundary_prob.toFixed(3)}</p>
+                        <p class="mb-1">Min gap: ${minGap} s</p>
+                        <p class="mb-1">Prominence: ${debug.prominence ?? 'None'}</p>
+                        <p class="mb-1">Min segment: ${minSegment} s</p>
+                        <p class="mb-1">Position bias: ${debug.position_bias ? 'On' : 'Off'}</p>
+                        <p class="mb-2">Smoothed: ${debug.smoothed ? 'Yes' : 'No'} (window ${smoothingWindow})</p>
+                        <h6 class="mt-2">Top Peaks</h6>
+                        <ul class="mb-0" style="max-height:150px; overflow:auto;">
+                            ${peaks || '<li>No peaks</li>'}
+                        </ul>
+                    </div>
+                </div>
+            `;
+        }
+
+        function computeBPM(beats, duration) {
+            if (!Array.isArray(beats) || beats.length < 2 || !duration) {
+                return null;
+            }
+            const intervals = [];
+            for (let i = 1; i < beats.length; i++) {
+                const diff = beats[i] - beats[i - 1];
+                if (diff > 1e-3) {
+                    intervals.push(diff);
+                }
+            }
+            if (!intervals.length) {
+                return null;
+            }
+            const sum = intervals.reduce((acc, val) => acc + val, 0);
+            const avgInterval = sum / intervals.length;
+            if (avgInterval <= 0) {
+                return null;
+            }
+            return 60 / avgInterval;
+        }
+
+        function formatBPM(beats, duration) {
+            const bpm = computeBPM(beats, duration);
+            if (!bpm || !Number.isFinite(bpm)) {
+                return '—';
+            }
+            return bpm.toFixed(1);
+        }
+
         function dedupeSorted(arr) {
             if (!Array.isArray(arr)) return [];
             const rounded = arr.map(v => Number.parseFloat(v)).filter(Number.isFinite);
@@ -428,6 +755,104 @@
             });
             return unique;
         }
+
+        function renderOverlayMarkers(boundaries, beats, boundaryStride = 1, beatStride = 1) {
+            if (!overlayWaveSurfer) return;
+            if (!overlayMarkerLayer || !overlayMarkerLayer.parentNode) {
+                const container = document.getElementById('overlayWaveform');
+                overlayMarkerLayer = document.createElement('div');
+                overlayMarkerLayer.className = 'marker-layer';
+                container.appendChild(overlayMarkerLayer);
+            }
+
+            const duration = overlayWaveSurfer.getDuration();
+            if (!duration || !Number.isFinite(duration) || duration <= 0) {
+                overlayMarkerLayer.innerHTML = '';
+                return;
+            }
+
+            overlayMarkerLayer.innerHTML = '';
+            const safeBoundaries = Array.isArray(boundaries) ? boundaries : [];
+            const safeBeats = Array.isArray(beats) ? beats : [];
+
+            safeBoundaries.forEach((boundary, index) => {
+                if (!Number.isFinite(boundary)) return;
+                if (index % boundaryStride !== 0) return;
+                const marker = document.createElement('div');
+                marker.className = 'marker-line marker-boundary';
+                marker.style.left = `${(boundary / duration) * 100}%`;
+                overlayMarkerLayer.appendChild(marker);
+            });
+
+            safeBeats.forEach((beat, index) => {
+                if (!Number.isFinite(beat)) return;
+                if (index % beatStride !== 0) return;
+                const marker = document.createElement('div');
+                marker.className = 'marker-line marker-beat';
+                marker.style.left = `${(beat / duration) * 100}%`;
+                overlayMarkerLayer.appendChild(marker);
+            });
+        }
+
+        async function refreshHistory() {
+            const container = document.getElementById('historyList');
+            if (!container) return;
+            try {
+                container.innerHTML = '<small class="text-muted">Loading…</small>';
+                const response = await fetch('/api/history');
+                if (!response.ok) {
+                    throw new Error('Failed to load history');
+                }
+                const payload = await response.json();
+                renderHistory(payload.entries || []);
+            } catch (err) {
+                console.warn('History unavailable:', err);
+                container.innerHTML = '<small class="text-muted">History unavailable.</small>';
+            }
+        }
+
+        function renderHistory(entries) {
+            const container = document.getElementById('historyList');
+            if (!container) return;
+
+            if (!Array.isArray(entries) || entries.length === 0) {
+                container.innerHTML = '<small class="text-muted">No analyses saved yet.</small>';
+                return;
+            }
+
+            const items = entries.map((entry) => {
+                const readableTs = entry.timestamp ? new Date(entry.timestamp).toLocaleString() : '—';
+                const segmentCount = typeof entry.segment_count === 'number' ? entry.segment_count : '—';
+                const historyId = entry.history_id || '';
+                return `
+                    <li class="list-group-item d-flex justify-content-between align-items-start">
+                        <div>
+                            <strong>${entry.track_id || 'Unknown track'}</strong>
+                            <div class="small text-muted">${readableTs}</div>
+                            <div class="small text-muted">Segments: ${segmentCount}</div>
+                        </div>
+                        <a class="btn btn-sm btn-outline-secondary" href="/api/history/${historyId}" target="_blank" rel="noopener">
+                            JSON
+                        </a>
+                    </li>
+                `;
+            }).join('');
+
+            container.innerHTML = `
+                <ul class="list-group list-group-flush">
+                    ${items}
+                </ul>
+            `;
+        }
+
+        const refreshHistoryButton = document.getElementById('refreshHistoryButton');
+        if (refreshHistoryButton) {
+            refreshHistoryButton.addEventListener('click', () => {
+                refreshHistory();
+            });
+        }
+
+        refreshHistory();
     </script>
 </body>
 

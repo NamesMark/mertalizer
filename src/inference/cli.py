@@ -6,6 +6,7 @@ Provides command-line interface for predicting structure from audio files.
 
 import argparse
 import json
+import sys
 import torch
 import numpy as np
 from pathlib import Path
@@ -14,6 +15,7 @@ import logging
 import librosa
 import soundfile as sf
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from modeling.system import MusicStructureModel, ModelConfig
 from data.preprocessing import AudioPreprocessor, AudioConfig
@@ -32,6 +34,12 @@ class InferenceConfig:
     batch_size: int = 1
     threshold: float = 0.5
     output_format: str = "json"  # "json" or "csv"
+    min_gap_seconds: float = 3.0
+    prominence: Optional[float] = None
+    smooth_boundaries: bool = False
+    smoothing_window: int = 1
+    min_segment_seconds: float = 1.5
+    use_position_bias: bool = True
 
 
 class MusicStructureInference:
@@ -77,7 +85,18 @@ class MusicStructureInference:
             logger.error(f"Failed to load model: {e}")
             raise
 
-    def predict(self, audio_path: str) -> Dict[str, Any]:
+    def predict(
+        self,
+        audio_path: str,
+        threshold: Optional[float] = None,
+        include_debug: bool = False,
+        smooth: Optional[bool] = None,
+        smoothing_window: Optional[int] = None,
+        min_gap: Optional[float] = None,
+        prominence: Optional[float] = None,
+        min_segment: Optional[float] = None,
+        position_bias: Optional[bool] = None,
+    ) -> Dict[str, Any]:
         """
         Predict music structure for an audio file.
 
@@ -100,18 +119,64 @@ class MusicStructureInference:
         embeddings = torch.from_numpy(embeddings_np).unsqueeze(0).to(self.device)
         mask = torch.ones(embeddings.size(0), embeddings.size(1), dtype=torch.bool, device=self.device)
 
+        with torch.no_grad():
+            outputs = self.model.forward(embeddings)
+
+        boundary_logits = outputs["boundary_logits"]
+        label_logits = outputs["label_logits"]
+
+        effective_threshold = (
+            self.config.threshold if threshold is None else float(threshold)
+        )
+        effective_smooth = (
+            self.config.smooth_boundaries if smooth is None else bool(smooth)
+        )
+        effective_window = smoothing_window
+        if effective_window is None:
+            effective_window = self.config.smoothing_window
+        effective_window = max(1, int(effective_window))
+        effective_min_gap = (
+            self.config.min_gap_seconds if min_gap is None else max(0.0, float(min_gap))
+        )
+        effective_prominence = (
+            self.config.prominence if prominence is None else prominence
+        )
+        effective_min_segment = (
+            self.config.min_segment_seconds
+            if min_segment is None
+            else max(0.0, float(min_segment))
+        )
+        effective_position_bias = (
+            self.config.use_position_bias
+            if position_bias is None
+            else bool(position_bias)
+        )
+
         boundary_times = self.model.predict_boundaries(
-            embeddings, frame_times, threshold=self.config.threshold, mask=mask
+            embeddings,
+            frame_times,
+            threshold=effective_threshold,
+            mask=mask,
+            boundary_logits=boundary_logits,
+            smooth=effective_smooth,
+            smoothing_window=effective_window,
+            min_gap_seconds=effective_min_gap,
+            prominence=effective_prominence,
         )
 
         duration = len(audio) / sr if sr else frame_times[-1]
-        boundary_times = self._postprocess_boundaries(boundary_times, duration)
+        boundary_times = self._postprocess_boundaries(
+            boundary_times, duration, min_segment_seconds=effective_min_segment
+        )
 
         labels = self.model.predict_labels(
             embeddings,
             frame_times,
             boundary_times,
             mask=mask,
+            label_logits=label_logits,
+            position_bias=effective_position_bias,
+            min_segment_seconds=effective_min_segment,
         )
 
         # Create segments
@@ -127,7 +192,38 @@ class MusicStructureInference:
                 }
             )
 
-        return {
+        debug_info = None
+        if include_debug:
+            boundary_probs = torch.sigmoid(boundary_logits).squeeze(0).detach().cpu().numpy()
+            if mask is not None:
+                mask_np = mask.squeeze(0).detach().cpu().numpy().astype(bool)
+                boundary_probs = np.where(mask_np, boundary_probs, 0.0)
+
+            max_prob = float(boundary_probs.max())
+            min_prob = float(boundary_probs.min())
+            mean_prob = float(boundary_probs.mean())
+            top_indices = np.argsort(boundary_probs)[-10:][::-1]
+            top_peaks = [
+                {"time": float(frame_times[idx]), "prob": float(boundary_probs[idx])}
+                for idx in top_indices
+            ]
+            debug_info = {
+                "max_boundary_prob": max_prob,
+                "mean_boundary_prob": mean_prob,
+                "min_boundary_prob": min_prob,
+                "top_boundary_peaks": top_peaks,
+                "threshold": effective_threshold,
+                "min_gap_seconds": effective_min_gap,
+                "prominence": effective_prominence,
+                "smoothed": effective_smooth,
+                "smoothing_window": effective_window,
+                "min_segment_seconds": effective_min_segment,
+                "position_bias": effective_position_bias,
+            }
+
+        timestamp = datetime.now(tz=timezone.utc).replace(microsecond=0).isoformat()
+
+        result = {
             "track_id": Path(audio_path).stem,
             "sr": sr,
             "duration": duration,
@@ -136,28 +232,99 @@ class MusicStructureInference:
             "segments": segments,
             "version": f"{self.config.model_type}@2025-01-24",
             "beats": beats,
+            "threshold": effective_threshold,
+            "smooth": effective_smooth,
+            "smoothing_window": effective_window,
+            "min_gap_seconds": effective_min_gap,
+            "min_segment_seconds": effective_min_segment,
+            "position_bias": effective_position_bias,
+            "timestamp": timestamp,
         }
 
+        if debug_info is not None:
+            result["debug"] = debug_info
+
+        return result
+
     def _postprocess_boundaries(
-        self, boundary_times: List[float], duration: float
+        self,
+        boundary_times: List[float],
+        duration: float,
+        min_segment_seconds: float = 0.0,
     ) -> List[float]:
         """Ensure boundary list includes start/end and is sorted."""
         if not boundary_times:
             return [0.0, float(duration)]
 
-        boundaries = sorted(set(float(b) for b in boundary_times))
+        # Sort and deduplicate with tolerance
+        sorted_bounds = sorted(float(b) for b in boundary_times)
+        boundaries: List[float] = []
+        for b in sorted_bounds:
+            if not boundaries or abs(b - boundaries[-1]) > 1e-3:
+                boundaries.append(b)
+
+        if not boundaries:
+            boundaries = [0.0]
+
         if boundaries[0] > 1e-3:
             boundaries.insert(0, 0.0)
         if duration - boundaries[-1] > 1e-3:
             boundaries.append(float(duration))
-        return boundaries
+        # Final pass to ensure strictly increasing and remove micro segments
+        cleaned: List[float] = []
+        last = None
+        for b in boundaries:
+            if last is None or b - last > 1e-3:
+                cleaned.append(b)
+                last = b
+        if len(cleaned) == 1:
+            cleaned.append(float(duration))
 
-    def predict_batch(self, audio_paths: List[str]) -> List[Dict[str, Any]]:
+        if min_segment_seconds > 0 and len(cleaned) > 2:
+            min_len = float(min_segment_seconds)
+            filtered = [cleaned[0]]
+            for boundary in cleaned[1:-1]:
+                if boundary - filtered[-1] >= min_len:
+                    filtered.append(boundary)
+            filtered.append(cleaned[-1])
+            cleaned = filtered
+
+            # ensure final segment meets minimum, else merge into previous
+            if len(cleaned) >= 3 and cleaned[-1] - cleaned[-2] < min_len:
+                cleaned.pop(-2)
+
+            if len(cleaned) < 2:
+                cleaned = [0.0, float(duration)]
+
+        return cleaned
+
+    def predict_batch(
+        self,
+        audio_paths: List[str],
+        include_debug: bool = False,
+        threshold: Optional[float] = None,
+        smooth: Optional[bool] = None,
+        smoothing_window: Optional[int] = None,
+        min_gap: Optional[float] = None,
+        prominence: Optional[float] = None,
+        min_segment: Optional[float] = None,
+        position_bias: Optional[bool] = None,
+    ) -> List[Dict[str, Any]]:
         """Predict structure for multiple audio files."""
         results = []
         for audio_path in audio_paths:
             try:
-                result = self.predict(audio_path)
+                result = self.predict(
+                    audio_path,
+                    threshold=threshold,
+                    include_debug=include_debug,
+                    smooth=smooth,
+                    smoothing_window=smoothing_window,
+                    min_gap=min_gap,
+                    prominence=prominence,
+                    min_segment=min_segment,
+                    position_bias=position_bias,
+                )
                 results.append(result)
                 logger.info(f"Processed {audio_path}")
             except Exception as e:
@@ -209,6 +376,39 @@ def main():
         "--batch", action="store_true", help="Process directory in batch"
     )
     parser.add_argument("--verbose", action="store_true", help="Verbose logging")
+    parser.add_argument(
+        "--min-gap",
+        type=float,
+        default=3.0,
+        help="Minimum gap between consecutive boundaries in seconds",
+    )
+    parser.add_argument(
+        "--min-segment",
+        type=float,
+        default=1.5,
+        help="Minimum duration (seconds) for individual segments",
+    )
+    parser.add_argument(
+        "--prominence",
+        type=float,
+        help="Minimum peak prominence for boundary detection (default: None)",
+    )
+    parser.add_argument(
+        "--no-smooth",
+        action="store_true",
+        help="Disable smoothing of boundary probabilities",
+    )
+    parser.add_argument(
+        "--smoothing-window",
+        type=int,
+        default=1,
+        help="Window size for boundary probability smoothing (odd integer recommended)",
+    )
+    parser.add_argument(
+        "--no-position-bias",
+        action="store_true",
+        help="Disable positional bias when assigning labels",
+    )
 
     args = parser.parse_args()
 
@@ -222,6 +422,12 @@ def main():
         device=args.device,
         threshold=args.threshold,
         output_format=args.format,
+        min_gap_seconds=args.min_gap,
+        prominence=args.prominence,
+        smooth_boundaries=not args.no_smooth,
+        smoothing_window=max(1, args.smoothing_window),
+        min_segment_seconds=args.min_segment,
+        use_position_bias=not args.no_position_bias,
     )
 
     # Create inference engine
@@ -232,7 +438,42 @@ def main():
 
     if audio_path.is_file():
         # Single file
-        result = inference.predict(str(audio_path))
+        result = inference.predict(
+            str(audio_path),
+            threshold=args.threshold,
+            include_debug=args.verbose,
+            smooth=not args.no_smooth,
+            smoothing_window=max(1, args.smoothing_window),
+            min_gap=args.min_gap,
+            prominence=args.prominence,
+            min_segment=args.min_segment,
+            position_bias=not args.no_position_bias,
+        )
+
+        if args.verbose and "debug" in result:
+            debug = result["debug"]
+            print(
+                "# Boundary probability summary:\n"
+                f"  max: {debug['max_boundary_prob']:.3f}  "
+                f"mean: {debug['mean_boundary_prob']:.3f}  "
+                f"min: {debug['min_boundary_prob']:.3f}  "
+                f"(threshold={debug['threshold']:.3f})",
+                file=sys.stderr,
+            )
+            for peak in debug["top_boundary_peaks"]:
+                print(
+                    f"  peak @ {peak['time']:.2f}s -> {peak['prob']:.3f}",
+                    file=sys.stderr,
+                )
+            print(
+                f"  min_gap={debug['min_gap_seconds']:.2f}s  "
+                f"prominence={debug['prominence']}  "
+                f"smoothed={debug['smoothed']}  "
+                f"window={debug['smoothing_window']}  "
+                f"min_segment={debug['min_segment_seconds']:.2f}s  "
+                f"position_bias={debug['position_bias']}",
+                file=sys.stderr,
+            )
 
         if args.output:
             inference.save_results(result, args.output)
@@ -251,7 +492,17 @@ def main():
             print(f"No audio files found in {audio_path}")
             return
 
-        results = inference.predict_batch([str(f) for f in audio_files])
+        results = inference.predict_batch(
+            [str(f) for f in audio_files],
+            include_debug=args.verbose,
+            threshold=args.threshold,
+            smooth=not args.no_smooth,
+            smoothing_window=max(1, args.smoothing_window),
+            min_gap=args.min_gap,
+            prominence=args.prominence,
+            min_segment=args.min_segment,
+            position_bias=not args.no_position_bias,
+        )
 
         if args.output:
             with open(args.output, "w") as f:

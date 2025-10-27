@@ -4,8 +4,8 @@ A comprehensive system for detecting musical structure boundaries and assigning 
 
 ## 🎵 Features
 
-- **Primary Model**: MERT 95M/330M SSL encoder with TCN/Transformer boundary detection and CRF labeling
-- **Baseline Model**: w2v-BERT-2.0 for comparison
+- **Primary Model**: MERT v1 95M SSL encoder with a TCN boundary detector and linear label head
+- **Optional Variants**: Swap in w2v-BERT-2.0 encoder or a transformer boundary head via config overrides
 - **Datasets**: Harmonix Set, SALAMI, Beatles/Isophonics, SPAM, CCMUSIC
 - **Outputs**: Trained checkpoints, CLI & REST inference, evaluation reports
 - **Web Dashboard**: Interactive audio upload and visualization interface
@@ -44,7 +44,10 @@ mertalizer/
 │   └── templates/         # HTML templates
 ├── data/                  # Dataset storage
 ├── models/                # Trained checkpoints
-└── scripts/              # Setup and run scripts
+├── demo.sh                # End-to-end capability walkthrough
+├── example.sh             # Sample pipeline runner
+├── run_server.sh          # Launch Python API + Rust web UI
+└── setup.sh               # Environment bootstrapper
 ```
 
 ## 🚀 Quick Start
@@ -69,12 +72,17 @@ python src/data/fetch_datasets.py --all
 # 3. Process data
 python src/data/ingestion.py --all
 
-# 4. Train model
+# 4. Extract embeddings (repeat for each dataset JSONL)
+python src/data/preprocessing.py --annotations data/processed/ccmusic.jsonl --dataset-name ccmusic
+
+# 5. Train model on precomputed embeddings
 python src/training/train.py --config configs/mert_95m.yaml
 
-# 5. Start web servers
+# 6. Start web servers
 ./run_server.sh
 ```
+
+> The embedding step looks up the `dataset` field in each JSON line and expects artifacts under `data/processed/embeddings/<dataset>/<track_id>.npz`. Repeat the command above for every dataset JSONL you ingested (e.g. `harmonix.jsonl`, `salami.jsonl`) and adjust `--dataset-name` accordingly.
 
 ## 🔧 Environment Variables
 
@@ -87,7 +95,7 @@ HF_TOKEN=your_hf_token_here
 WANDB_KEY=your_wandb_key_here
 
 # Model paths
-MODEL_PATH=models/best_model.ckpt
+MODEL_PATH=models/checkpoints/final_model.ckpt
 PYTHON_API_URL=http://localhost:8000
 
 # Server settings
@@ -105,13 +113,13 @@ PORT=3000
 ### CLI Inference
 ```bash
 # Single file
-python src/inference/cli.py audio.wav --model models/best_model.ckpt
+python src/inference/cli.py audio.wav --model models/checkpoints/final_model.ckpt
 
 # Batch processing
-python src/inference/cli.py audio_dir/ --model models/best_model.ckpt --batch
+python src/inference/cli.py audio_dir/ --model models/checkpoints/final_model.ckpt --batch
 
 # Export results
-python src/inference/cli.py audio.wav --model models/best_model.ckpt --output results.json
+python src/inference/cli.py audio.wav --model models/checkpoints/final_model.ckpt --output results.json
 ```
 
 ### REST API
@@ -129,19 +137,19 @@ open http://localhost:8000/docs
 ### ONNX Export
 ```bash
 # Export trained model to ONNX
-python src/export/onnx.py --checkpoint models/best_model.ckpt --output models/model.onnx
+python src/export/onnx.py --checkpoint models/checkpoints/final_model.ckpt --output models/model.onnx
 
 # Test ONNX model
-python src/export/onnx.py --checkpoint models/best_model.ckpt --output models/model.onnx --test
+python src/export/onnx.py --checkpoint models/checkpoints/final_model.ckpt --output models/model.onnx --test
 ```
 
 ## 🎯 Model Architecture
 
 ### Two-Head Architecture
-- **Encoder**: Frozen/fine-tunable SSL encoder (MERT or w2v-BERT)
-- **Boundary Head**: TCN or Transformer for boundary detection
-- **Label Head**: Linear classifier with CRF for segment labeling
-- **Loss**: Combined boundary (BCE + Focal) and label (CrossEntropy) losses
+- **Encoder**: Frozen/fine-tunable SSL encoder (MERT 95M by default, w2v-BERT optional)
+- **Boundary Head**: TCN detector (default) with configurable transformer alternative
+- **Label Head**: Linear classifier predicting canonical segment classes
+- **Loss**: Binary cross-entropy with optional focal term for boundaries; cross-entropy for labels
 
 ### Classic Baseline
 - **Self-Similarity Matrix**: Cosine similarity between embeddings
@@ -199,7 +207,7 @@ python src/export/onnx.py --checkpoint models/best_model.ckpt --output models/mo
     {"start": 37.5, "end": 50.0, "label": "VERSE"},
     {"start": 50.0, "end": 180.5, "label": "OUTRO"}
   ],
-  "version": "mert-95m-tcn-crf@2025-01-24"
+  "version": "mert-95m-tcn@2025-01-24"
 }
 ```
 

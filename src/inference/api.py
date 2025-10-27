@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 import logging
-from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
+from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Form
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -23,6 +23,7 @@ import soundfile as sf
 from modeling.system import MusicStructureModel, ModelConfig
 from data.preprocessing import AudioPreprocessor
 from inference.cli import InferenceConfig, MusicStructureInference
+from inference.history import save_result, list_results, load_result
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +33,7 @@ class PredictionRequest(BaseModel):
     """Request model for prediction."""
 
     track_id: Optional[str] = None
-    threshold: float = 0.5
+    threshold: float = 0.1
     model_type: str = "mert"
 
 
@@ -47,6 +48,15 @@ class PredictionResponse(BaseModel):
     segments: List[Dict[str, Any]]
     version: str
     beats: Optional[List[float]] = None
+    threshold: float
+    smooth: bool
+    smoothing_window: int
+    min_gap_seconds: float
+    min_segment_seconds: float
+    position_bias: bool
+    debug: Optional[Dict[str, Any]] = None
+    timestamp: str
+    history_id: Optional[str] = None
 
 
 class ErrorResponse(BaseModel):
@@ -116,8 +126,14 @@ def create_app(model_path: str) -> FastAPI:
     async def predict_structure(
         background_tasks: BackgroundTasks,
         audio_file: UploadFile = File(...),
-        threshold: float = 0.5,
-        track_id: Optional[str] = None,
+        threshold: float = Form(0.1),
+        smooth: Optional[str] = Form(None),
+        smoothing_window: int = Form(1),
+        min_gap: float = Form(3.0),
+        prominence: Optional[float] = Form(None),
+        min_segment: float = Form(1.5),
+        position_bias: Optional[str] = Form(None),
+        track_id: Optional[str] = Form(None),
     ):
         """
         Predict music structure from uploaded audio file.
@@ -153,11 +169,36 @@ def create_app(model_path: str) -> FastAPI:
                 tmp_file.flush()
 
                 # Predict structure
-                result = inference_engine.predict(tmp_file.name)
+                should_smooth = (
+                    inference_engine.config.smooth_boundaries
+                    if smooth is None
+                    else smooth.lower() in {"true", "1", "on"}
+                )
+                window = max(1, smoothing_window)
+                position_bias_flag = (
+                    inference_engine.config.use_position_bias
+                    if position_bias is None
+                    else position_bias.lower() in {"true", "1", "on"}
+                )
 
+                result = inference_engine.predict(
+                    tmp_file.name,
+                    threshold=threshold,
+                    include_debug=True,
+                    smooth=should_smooth,
+                    smoothing_window=window,
+                    min_gap=min_gap,
+                    prominence=prominence,
+                    min_segment=min_segment,
+                    position_bias=position_bias_flag,
+                )
+                
                 # Update track_id if provided
                 if track_id:
                     result["track_id"] = track_id
+
+                history_id = save_result(result)
+                result["history_id"] = history_id
 
                 # Clean up temporary file
                 background_tasks.add_task(os.unlink, tmp_file.name)
@@ -176,7 +217,13 @@ def create_app(model_path: str) -> FastAPI:
     async def predict_batch(
         background_tasks: BackgroundTasks,
         audio_files: List[UploadFile] = File(...),
-        threshold: float = 0.5,
+        threshold: float = Form(0.1),
+        smooth: Optional[str] = Form(None),
+        smoothing_window: int = Form(1),
+        min_gap: float = Form(3.0),
+        prominence: Optional[float] = Form(None),
+        min_segment: float = Form(1.5),
+        position_bias: Optional[str] = Form(None),
     ):
         """
         Predict music structure for multiple audio files.
@@ -220,8 +267,31 @@ def create_app(model_path: str) -> FastAPI:
             # Process all files
             for i, temp_file in enumerate(temp_files):
                 try:
-                    result = inference_engine.predict(temp_file)
+                    should_smooth = (
+                        inference_engine.config.smooth_boundaries
+                        if smooth is None
+                        else smooth.lower() in {"true", "1", "on"}
+                    )
+                    window = max(1, smoothing_window)
+                    position_bias_flag = (
+                        inference_engine.config.use_position_bias
+                        if position_bias is None
+                        else position_bias.lower() in {"true", "1", "on"}
+                    )
+                    result = inference_engine.predict(
+                        temp_file,
+                        threshold=threshold,
+                        include_debug=True,
+                        smooth=should_smooth,
+                        smoothing_window=window,
+                        min_gap=min_gap,
+                        prominence=prominence,
+                        min_segment=min_segment,
+                        position_bias=position_bias_flag,
+                    )
                     result["track_id"] = audio_files[i].filename
+                    history_id = save_result(result)
+                    result["history_id"] = history_id
                     results.append(result)
                 except Exception as e:
                     results.append(
@@ -267,6 +337,21 @@ def create_app(model_path: str) -> FastAPI:
             "device": str(inference_engine.device),
             "threshold": inference_engine.config.threshold,
         }
+
+    @app.get("/history")
+    async def get_history(limit: int = 20):
+        """Return recent prediction history metadata."""
+        safe_limit = max(1, min(100, int(limit)))
+        entries = list_results(limit=safe_limit)
+        return {"entries": entries}
+
+    @app.get("/history/{history_id}")
+    async def get_history_entry(history_id: str):
+        """Return a stored prediction result."""
+        entry = load_result(history_id)
+        if entry is None:
+            raise HTTPException(status_code=404, detail="History entry not found")
+        return entry
 
     return app
 
