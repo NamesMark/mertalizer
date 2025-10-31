@@ -23,7 +23,12 @@ import soundfile as sf
 from modeling.system import MusicStructureModel, ModelConfig
 from data.preprocessing import AudioPreprocessor
 from inference.cli import InferenceConfig, MusicStructureInference
-from inference.history import save_result, list_results, load_result
+from inference.history import (
+    save_result,
+    list_results,
+    load_result,
+    get_audio_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +62,7 @@ class PredictionResponse(BaseModel):
     debug: Optional[Dict[str, Any]] = None
     timestamp: str
     history_id: Optional[str] = None
+    audio_url: Optional[str] = None
 
 
 class ErrorResponse(BaseModel):
@@ -197,8 +203,10 @@ def create_app(model_path: str) -> FastAPI:
                 if track_id:
                     result["track_id"] = track_id
 
-                history_id = save_result(result)
+                history_id, audio_rel = save_result(result, audio_source=tmp_file.name)
                 result["history_id"] = history_id
+                if audio_rel:
+                    result["audio_url"] = f"/history/{history_id}/audio"
 
                 # Clean up temporary file
                 background_tasks.add_task(os.unlink, tmp_file.name)
@@ -290,8 +298,10 @@ def create_app(model_path: str) -> FastAPI:
                         position_bias=position_bias_flag,
                     )
                     result["track_id"] = audio_files[i].filename
-                    history_id = save_result(result)
+                    history_id, audio_rel = save_result(result, audio_source=temp_file)
                     result["history_id"] = history_id
+                    if audio_rel:
+                        result["audio_url"] = f"/history/{history_id}/audio"
                     results.append(result)
                 except Exception as e:
                     results.append(
@@ -351,7 +361,17 @@ def create_app(model_path: str) -> FastAPI:
         entry = load_result(history_id)
         if entry is None:
             raise HTTPException(status_code=404, detail="History entry not found")
+        if entry.get("audio_url") is None and get_audio_path(history_id):
+            entry["audio_url"] = f"/history/{history_id}/audio"
         return entry
+
+    @app.get("/history/{history_id}/audio")
+    async def get_history_audio(history_id: str):
+        """Stream stored audio for a history entry."""
+        audio_path = get_audio_path(history_id)
+        if audio_path is None:
+            raise HTTPException(status_code=404, detail="Audio not available for entry")
+        return FileResponse(audio_path)
 
     return app
 

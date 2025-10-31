@@ -263,6 +263,22 @@
         let currentMinGap = MIN_GAP_DEFAULT;
         let currentAudioUrl = null;
         let overlayMarkerLayer = null;
+        let savedHistoryAudioUrl = null;
+        let lastHistoryId = null;
+
+        function normalizeApiPath(path) {
+            if (!path) return null;
+            if (path.startsWith('http://') || path.startsWith('https://')) {
+                return path;
+            }
+            if (path.startsWith('/api/')) {
+                return path;
+            }
+            if (path.startsWith('/')) {
+                return `/api${path}`;
+            }
+            return `/api/${path}`;
+        }
         if (thresholdValue) {
             thresholdValue.textContent = currentThreshold.toFixed(2);
         }
@@ -318,6 +334,8 @@
             currentMinGap = MIN_GAP_DEFAULT;
             currentMinSegment = MIN_SEGMENT_DEFAULT;
             currentPositionBias = POSITION_BIAS_DEFAULT;
+            savedHistoryAudioUrl = null;
+            lastHistoryId = null;
             results.style.display = 'none';
             analyzeButton.disabled = false;
             if (currentAudioUrl) {
@@ -446,6 +464,15 @@
         function displayResults(result) {
             results.style.display = 'block';
 
+            if (typeof result.history_id === 'string' && result.history_id.length) {
+                lastHistoryId = result.history_id;
+            }
+
+            const remoteAudioUrl = normalizeApiPath(result.audio_url);
+            if (remoteAudioUrl) {
+                savedHistoryAudioUrl = remoteAudioUrl;
+            }
+
             const usedThreshold = result.threshold ?? currentThreshold;
             currentThreshold = usedThreshold;
             if (thresholdSlider) {
@@ -473,20 +500,41 @@
                 currentMinGap = result.min_gap_seconds;
             }
 
+            const hasLocalFile = Boolean(currentAudioFile);
+            if (!hasLocalFile) {
+                currentAudioUrl = remoteAudioUrl || null;
+            }
+
             if (currentAudioUrl) {
                 audioPlayer.src = currentAudioUrl;
                 audioPlayer.load();
                 audioPlayer.pause();
                 audioPlayer.currentTime = 0;
+            } else {
+                audioPlayer.removeAttribute('src');
+                audioPlayer.load();
             }
 
-            // Display track info
+            const readableTimestamp = result.timestamp ? new Date(result.timestamp).toLocaleString() : '—';
+            const audioSourceLabel = hasLocalFile
+                ? 'Uploaded (this session)'
+                : remoteAudioUrl
+                ? 'Stored history audio'
+                : 'Unavailable';
+            const audioLinkHtml = remoteAudioUrl
+                ? `<p><a class="btn btn-sm btn-outline-secondary" href="${remoteAudioUrl}" target="_blank" rel="noopener">Download stored audio</a></p>`
+                : '';
+
             document.getElementById('trackInfo').innerHTML = `
                 <div class="card">
                     <div class="card-body">
                         <p><strong>Track ID:</strong> ${result.track_id}</p>
+                        <p><strong>History ID:</strong> ${result.history_id ?? '—'}</p>
+                        <p><strong>Timestamp:</strong> ${readableTimestamp}</p>
                         <p><strong>Duration:</strong> ${result.duration.toFixed(2)}s</p>
                         <p><strong>Sample Rate:</strong> ${result.sr} Hz</p>
+                        <p><strong>Audio Source:</strong> ${audioSourceLabel}</p>
+                        ${audioLinkHtml}
                         <p><strong>Threshold:</strong> ${(result.threshold ?? currentThreshold).toFixed(2)}</p>
                         <p><strong>Smoothing:</strong> ${(result.smooth ?? (currentSmoothingWindow > 1)) ? 'On' : 'Off'}</p>
                         <p><strong>Min Segment:</strong> ${(result.min_segment_seconds ?? currentMinSegment).toFixed(2)} s</p>
@@ -545,6 +593,25 @@
                 overlayMarkerLayer.parentNode.removeChild(overlayMarkerLayer);
             }
             overlayMarkerLayer = null;
+
+            const waveformContainer = document.getElementById('waveform');
+            const overlayContainer = document.getElementById('overlayWaveform');
+            if (waveformContainer) {
+                waveformContainer.innerHTML = '';
+            }
+            if (overlayContainer) {
+                overlayContainer.innerHTML = '';
+            }
+
+            if (!currentAudioFile && !currentAudioUrl) {
+                if (waveformContainer) {
+                    waveformContainer.innerHTML = '<div class="p-3 text-muted">Audio unavailable for this history entry.</div>';
+                }
+                if (overlayContainer) {
+                    overlayContainer.innerHTML = '<div class="p-3 text-muted">Audio unavailable.</div>';
+                }
+                return;
+            }
 
             wavesurfer = WaveSurfer.create({
                 container: '#waveform',
@@ -824,16 +891,25 @@
                 const readableTs = entry.timestamp ? new Date(entry.timestamp).toLocaleString() : '—';
                 const segmentCount = typeof entry.segment_count === 'number' ? entry.segment_count : '—';
                 const historyId = entry.history_id || '';
+                const hasAudioBadge = entry.has_audio
+                    ? '<span class="badge bg-success ms-2">audio</span>'
+                    : '';
                 return `
                     <li class="list-group-item d-flex justify-content-between align-items-start">
                         <div>
                             <strong>${entry.track_id || 'Unknown track'}</strong>
                             <div class="small text-muted">${readableTs}</div>
                             <div class="small text-muted">Segments: ${segmentCount}</div>
+                            ${hasAudioBadge}
                         </div>
-                        <a class="btn btn-sm btn-outline-secondary" href="/api/history/${historyId}" target="_blank" rel="noopener">
-                            JSON
-                        </a>
+                        <div class="btn-group">
+                            <button class="btn btn-sm btn-primary" data-history-id="${historyId}">
+                                <i class="fas fa-eye me-1"></i>View
+                            </button>
+                            <a class="btn btn-sm btn-outline-secondary" href="/api/history/${historyId}" target="_blank" rel="noopener">
+                                JSON
+                            </a>
+                        </div>
                     </li>
                 `;
             }).join('');
@@ -843,6 +919,54 @@
                     ${items}
                 </ul>
             `;
+
+            container.querySelectorAll('button[data-history-id]').forEach((button) => {
+                button.addEventListener('click', (event) => {
+                    const historyId = event.currentTarget.getAttribute('data-history-id');
+                    loadHistoryEntry(historyId);
+                });
+            });
+        }
+
+        async function loadHistoryEntry(historyId) {
+            if (!historyId) return;
+            try {
+                loading.style.display = 'block';
+                const response = await fetch(`/api/history/${historyId}`);
+                if (!response.ok) {
+                    let message = 'Failed to load history entry';
+                    try {
+                        const errJson = await response.json();
+                        if (errJson?.error) {
+                            message = `${errJson.error}${errJson.detail ? `: ${errJson.detail}` : ''}`;
+                        }
+                    } catch (jsonErr) {
+                        const fallback = await response.text();
+                        if (fallback) {
+                            message = fallback;
+                        }
+                    }
+                    throw new Error(message);
+                }
+
+                const result = await response.json();
+                currentAudioFile = null;
+                currentAudioUrl = null;
+                const remoteAudio = normalizeApiPath(result.audio_url);
+                if (remoteAudio) {
+                    currentAudioUrl = remoteAudio;
+                    savedHistoryAudioUrl = remoteAudio;
+                } else {
+                    savedHistoryAudioUrl = null;
+                }
+                analyzeButton.disabled = false;
+                displayResults(result);
+            } catch (error) {
+                console.error('History load error:', error);
+                alert(error?.message || 'Failed to load history entry.');
+            } finally {
+                loading.style.display = 'none';
+            }
         }
 
         const refreshHistoryButton = document.getElementById('refreshHistoryButton');

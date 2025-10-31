@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 HISTORY_DIR = Path("data/history")
+AUDIO_DIR = HISTORY_DIR / "audio"
 
 
 def _utc_now_iso() -> str:
@@ -25,12 +30,22 @@ def _slugify(value: Optional[str]) -> str:
     return slug or "track"
 
 
-def save_result(result: Dict[str, Any]) -> str:
+def _find_audio_file(history_id: str) -> Optional[Path]:
+    """Return the path to a stored audio file for the given history id."""
+    if not AUDIO_DIR.exists():
+        return None
+    for candidate in AUDIO_DIR.glob(f"{history_id}.*"):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def save_result(result: Dict[str, Any], audio_source: Optional[str] = None) -> Tuple[str, Optional[str]]:
     """
-    Persist a prediction result to disk.
+    Persist a prediction result (and optional audio) to disk.
 
     Returns:
-        history_id that can be used to retrieve the entry later.
+        Tuple of (history_id, relative_audio_path or None)
     """
     HISTORY_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -44,10 +59,27 @@ def save_result(result: Dict[str, Any]) -> str:
     history_id = f"{time_compact}_{track_slug}"
     history_path = HISTORY_DIR / f"{history_id}.json"
 
+    relative_audio: Optional[str] = None
+    if audio_source:
+        try:
+            src_path = Path(audio_source)
+            if src_path.exists():
+                AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+                suffix = src_path.suffix or ".wav"
+                audio_dest = AUDIO_DIR / f"{history_id}{suffix}"
+                shutil.copy2(src_path, audio_dest)
+                relative_audio = str(audio_dest.relative_to(HISTORY_DIR))
+        except Exception as exc:
+            logger.warning("Failed to store history audio for %s: %s", history_id, exc)
+
+    result.setdefault("history_id", history_id)
+    if relative_audio:
+        result.setdefault("history_audio_path", relative_audio)
+
     with history_path.open("w", encoding="utf-8") as fp:
         json.dump(result, fp, indent=2)
 
-    return history_id
+    return history_id, relative_audio
 
 
 def list_results(limit: int = 20) -> List[Dict[str, Any]]:
@@ -63,13 +95,18 @@ def list_results(limit: int = 20) -> List[Dict[str, Any]]:
         except Exception:
             continue
 
+        history_id = path.stem
+        has_audio = _find_audio_file(history_id) is not None
+
         entries.append(
             {
-                "history_id": path.stem,
+                "history_id": history_id,
                 "track_id": data.get("track_id"),
                 "timestamp": data.get("timestamp"),
                 "duration": data.get("duration"),
                 "segment_count": len(data.get("segments", [])),
+                "audio_url": f"/history/{history_id}/audio" if has_audio else None,
+                "has_audio": has_audio,
             }
         )
         if len(entries) >= limit:
@@ -85,6 +122,18 @@ def load_result(history_id: str) -> Optional[Dict[str, Any]]:
         return None
     try:
         with history_path.open("r", encoding="utf-8") as fp:
-            return json.load(fp)
-    except Exception:
+            data = json.load(fp)
+    except Exception as exc:
+        logger.error("Failed to load history %s: %s", history_id, exc)
         return None
+
+    data.setdefault("history_id", history_id)
+    audio_path = _find_audio_file(history_id)
+    if audio_path:
+        data["audio_url"] = f"/history/{history_id}/audio"
+    return data
+
+
+def get_audio_path(history_id: str) -> Optional[Path]:
+    """Return filesystem path to stored audio for a history entry."""
+    return _find_audio_file(history_id)

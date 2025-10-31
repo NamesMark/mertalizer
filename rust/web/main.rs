@@ -1,12 +1,14 @@
 use axum::{
-    extract::{DefaultBodyLimit, Multipart, State},
-    http::StatusCode,
-    response::{Html, Json},
+    body::Body,
+    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
+    http::{header, HeaderValue, StatusCode},
+    response::{Html, Json, Response},
     routing::{get, post},
     Router,
 };
 use reqwest::multipart;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::fs;
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
@@ -28,6 +30,26 @@ struct PredictionResponse {
     version: String,
     #[serde(default)]
     beats: Option<Vec<f64>>,
+    #[serde(default)]
+    threshold: Option<f64>,
+    #[serde(default)]
+    smooth: Option<bool>,
+    #[serde(default)]
+    smoothing_window: Option<u32>,
+    #[serde(default)]
+    min_gap_seconds: Option<f64>,
+    #[serde(default)]
+    min_segment_seconds: Option<f64>,
+    #[serde(default)]
+    position_bias: Option<bool>,
+    #[serde(default)]
+    debug: Option<Value>,
+    #[serde(default)]
+    timestamp: Option<String>,
+    #[serde(default)]
+    history_id: Option<String>,
+    #[serde(default)]
+    audio_url: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -70,6 +92,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/", get(index_handler))
         .route("/api/health", get(health_handler))
+        .route("/api/history", get(history_handler))
+        .route("/api/history/:id", get(history_entry_handler))
+        .route("/api/history/:id/audio", get(history_audio_handler))
         .route("/api/predict", post(predict_handler))
         .route("/api/upload", post(upload_handler))
         .nest_service("/static", ServeDir::new("web_dashboard/static"))
@@ -288,4 +313,137 @@ async fn call_python_api(api_url: &str, file_path: &str) -> Result<PredictionRes
         .map_err(|e| format!("Failed to parse response: {}", e))?;
 
     Ok(prediction)
+}
+
+async fn proxy_python_get(
+    api_url: &str,
+    path: &str,
+) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+    let client = reqwest::Client::new();
+    let url = format!("{}{}", api_url.trim_end_matches('/'), path);
+
+    let response = client.get(&url).send().await.map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorResponse {
+                error: "Failed to contact Python API".to_string(),
+                detail: Some(e.to_string()),
+            }),
+        )
+    })?;
+
+    if !response.status().is_success() {
+        let status_code = response.status().as_u16();
+        let detail = response.text().await.unwrap_or_default();
+        return Err((
+            StatusCode::from_u16(status_code).unwrap_or(StatusCode::BAD_GATEWAY),
+            Json(ErrorResponse {
+                error: "Upstream API error".to_string(),
+                detail: Some(detail),
+            }),
+        ));
+    }
+
+    let json: Value = response.json().await.map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorResponse {
+                error: "Invalid JSON from API".to_string(),
+                detail: Some(e.to_string()),
+            }),
+        )
+    })?;
+
+    Ok(Json(json))
+}
+
+async fn proxy_python_audio(
+    api_url: &str,
+    path: &str,
+) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    let client = reqwest::Client::new();
+    let url = format!("{}{}", api_url.trim_end_matches('/'), path);
+
+    let response = client.get(&url).send().await.map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorResponse {
+                error: "Failed to contact Python API".to_string(),
+                detail: Some(e.to_string()),
+            }),
+        )
+    })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let detail = response.text().await.unwrap_or_default();
+        return Err((
+            StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+            Json(ErrorResponse {
+                error: "Upstream API error".to_string(),
+                detail: Some(detail),
+            }),
+        ));
+    }
+
+    let headers = response.headers().clone();
+    let bytes = response.bytes().await.map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorResponse {
+                error: "Invalid audio payload from API".to_string(),
+                detail: Some(e.to_string()),
+            }),
+        )
+    })?;
+
+    let mut resp = Response::new(Body::from(bytes));
+    *resp.status_mut() = StatusCode::OK;
+
+    for key in [
+        header::CONTENT_TYPE,
+        header::CONTENT_LENGTH,
+        header::CONTENT_DISPOSITION,
+    ] {
+        if let Some(value) = headers.get(key.as_str()) {
+            if let Ok(value_str) = value.to_str() {
+                if let Ok(header_value) = HeaderValue::from_str(value_str) {
+                    resp.headers_mut().insert(key, header_value);
+                }
+            }
+        }
+    }
+
+    Ok(resp)
+}
+
+#[derive(Debug, Deserialize)]
+struct HistoryQuery {
+    limit: Option<u32>,
+}
+async fn history_handler(
+    State(state): State<AppState>,
+    Query(query): Query<HistoryQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+    let limit = query.limit.unwrap_or(20);
+
+    proxy_python_get(&state.python_api_url, &format!("/history?limit={}", limit)).await
+}
+
+async fn history_entry_handler(
+    State(state): State<AppState>,
+    Path(history_id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+    proxy_python_get(&state.python_api_url, &format!("/history/{}", history_id)).await
+}
+
+async fn history_audio_handler(
+    State(state): State<AppState>,
+    Path(history_id): Path<String>,
+) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    proxy_python_audio(
+        &state.python_api_url,
+        &format!("/history/{}/audio", history_id),
+    )
+    .await
 }
