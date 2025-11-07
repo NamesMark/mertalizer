@@ -144,15 +144,21 @@ impl PredictionOverrides {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
-    let model_path =
-        std::env::var("MODEL_PATH").unwrap_or_else(|_| "models/best_model.ckpt".to_string());
-    let python_bin = std::env::var("PYTHON_BIN").unwrap_or_else(|_| "python".to_string());
+    let model_path = std::env::var("MODEL_PATH")
+        .unwrap_or_else(|_| "models/mertalizer_traced.pt".to_string());
+
+    // Try to use venv Python first, fallback to system Python
+    let python_bin = std::env::var("PYTHON_BIN").unwrap_or_else(|_| {
+        let venv_python = PathBuf::from("venv/bin/python");
+        if venv_python.exists() {
+            venv_python.display().to_string()
+        } else {
+            "python3".to_string()
+        }
+    });
     let port = std::env::var("PORT").unwrap_or_else(|_| "3000".to_string());
 
-    let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .to_path_buf();
+    let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
     let predictor = Arc::new(MusicStructurePredictor::new(
         project_root.clone(),
@@ -173,7 +179,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/history/:id/audio", get(history_audio_handler))
         .route("/api/predict", post(predict_handler))
         .route("/api/upload", post(upload_handler))
-        .nest_service("/static", ServeDir::new("web_dashboard/static"))
+        .nest_service("/static", ServeDir::new("static"))
         .layer(CorsLayer::permissive())
         .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
         .with_state(state);
@@ -188,7 +194,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn index_handler() -> Html<&'static str> {
-    Html(include_str!("../../web_dashboard/templates/index.html"))
+    Html(include_str!("../templates/index.html"))
 }
 
 async fn health_handler(State(state): State<AppState>) -> Json<Value> {

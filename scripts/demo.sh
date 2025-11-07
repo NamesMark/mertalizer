@@ -374,7 +374,7 @@ print('  • Performance optimization')
 print()
 
 print('Note: Actual export requires trained model checkpoint')
-print('Command: python src/export/onnx.py --checkpoint model.ckpt --output model.onnx')
+print('Command: python ml/export/onnx.py --checkpoint model.ckpt --output model.onnx')
 "
 
 print_success "ONNX export demonstration completed"
@@ -457,7 +457,7 @@ echo ""
 print_success "🎉 Mertalizer demo completed successfully!"
 echo ""
 echo "Next steps:"
-echo "1. Train a model: python src/training/train.py --config configs/mert_95m.yaml"
-echo "2. Run inference: python src/inference/cli.py audio.wav --model models/best.ckpt"
+echo "1. Train a model: python ml/training/train.py --config configs/mert_95m.yaml"
+echo "2. Run inference: python ml/inference/cli.py audio.wav --model models/best.ckpt"
 echo "3. Start web dashboard: ./run_server.sh"
-echo "4. Export to ONNX: python src/export/onnx.py --checkpoint models/best.ckpt --output model.onnx"
+echo "4. Export to ONNX: python ml/export/onnx.py --checkpoint models/best.ckpt --output model.onnx"

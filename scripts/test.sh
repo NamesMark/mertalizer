@@ -125,7 +125,7 @@ print('Dummy model saved')
 "
 
 # Test CLI with dummy model
-python src/inference/cli.py test_audio.wav --model test_model.ckpt --output test_output.json || echo "CLI test completed (expected to fail with dummy model)"
+python ml/inference/cli.py test_audio.wav --model test_model.ckpt --output test_output.json || echo "CLI test completed (expected to fail with dummy model)"
 
 # Test 7: ONNX export
 echo ""
@@ -143,7 +143,7 @@ print('Dummy model for ONNX export created')
 "
 
 # Test ONNX export (this will fail with dummy model, but tests the code path)
-python src/export/onnx.py --checkpoint test_model_for_onnx.ckpt --output test_model.onnx || echo "ONNX export test completed (expected to fail with dummy model)"
+python ml/export/onnx.py --checkpoint test_model_for_onnx.ckpt --output test_model.onnx || echo "ONNX export test completed (expected to fail with dummy model)"
 
 # Test 8: Rust compilation
 echo ""

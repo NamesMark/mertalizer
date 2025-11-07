@@ -155,14 +155,14 @@ impl HistoryStore {
             .with_context(|| format!("Failed to read {}", history_path.display()))?;
         let mut value: Value = serde_json::from_str(&data).context("Invalid history JSON")?;
 
-        if value.get("audio_url").and_then(|v| v.as_str()).is_none() {
-            if self.audio_file_exists(history_id).await? {
-                value.as_object_mut().map(|obj| {
-                    obj.insert(
-                        "audio_url".into(),
-                        Value::String(format!("/api/history/{history_id}/audio")),
-                    );
-                });
+        if value.get("audio_url").and_then(|v| v.as_str()).is_none()
+            && self.audio_file_exists(history_id).await?
+        {
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert(
+                    "audio_url".into(),
+                    Value::String(format!("/api/history/{history_id}/audio")),
+                );
             }
         }
 
@@ -224,8 +224,6 @@ fn slugify(input: &str) -> String {
         .map(|ch| {
             if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' {
                 ch.to_ascii_lowercase()
-            } else if ch.is_ascii_whitespace() || ch == '-' {
-                '-'
             } else {
                 '-'
             }
