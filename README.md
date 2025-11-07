@@ -1,6 +1,6 @@
 # Mertalizer: Music Structure Recognition
 
-A comprehensive system for detecting musical structure boundaries and assigning section labels (intro/verse/pre-chorus/chorus/bridge/solo/outro/other) using music-native SSL encoders.
+A system for detecting musical structure boundaries and assigning section labels (intro/verse/pre-chorus/chorus/bridge/solo/outro/other) using music-native SSL encoders.
 
 ## 🎵 Features
 
@@ -15,39 +15,42 @@ A comprehensive system for detecting musical structure boundaries and assigning 
 
 ```
 mertalizer/
-├── src/                    # Python ML components
-│   ├── data/              # Data processing and ingestion
-│   │   ├── ontology.py    # Label mapping system
+├── Cargo.toml             # Rust project configuration
+├── src/                   # Rust web server (main entry point)
+│   ├── main.rs           # Axum web server
+│   ├── predictor.rs      # Python CLI integration
+│   └── history.rs        # Prediction history management
+├── ml/                    # Python ML components
+│   ├── data/             # Data processing and ingestion
+│   │   ├── ontology.py   # Label mapping system
 │   │   ├── fetch_datasets.py  # Dataset downloader
-│   │   ├── ingestion.py   # Data normalization
+│   │   ├── ingestion.py  # Data normalization
 │   │   └── preprocessing.py   # Audio preprocessing
-│   ├── modeling/          # Model architectures
-│   │   ├── system.py      # Two-head architecture
+│   ├── modeling/         # Model architectures
+│   │   ├── system.py     # Two-head architecture
 │   │   └── ssm_novelty.py # Classic baseline
-│   ├── training/          # Training scripts
-│   │   └── train.py       # LightningModule training
-│   ├── evaluation/        # Metrics and evaluation
-│   │   └── metrics.py     # Boundary & label metrics
-│   ├── inference/         # CLI and REST API
-│   │   ├── cli.py         # Command-line interface
-│   │   └── api.py         # FastAPI REST server
-│   └── export/            # ONNX export
-│       └── onnx.py        # Model export utilities
-├── rust/                  # Rust components
-│   ├── web/               # Web server
-│   │   └── main.rs       # Axum web server
-│   └── Cargo.toml         # Rust dependencies
-├── configs/               # Model configurations
-│   ├── mert_95m.yaml     # MERT configuration
+│   ├── training/         # Training scripts
+│   │   └── train.py      # LightningModule training
+│   ├── evaluation/       # Metrics and evaluation
+│   │   └── metrics.py    # Boundary & label metrics
+│   ├── inference/        # CLI and REST API
+│   │   ├── cli.py        # Command-line interface
+│   │   └── api.py        # FastAPI REST server
+│   └── export/           # ONNX export
+│       └── onnx.py       # Model export utilities
+├── configs/              # Model configurations
+│   ├── mert_95m.yaml    # MERT configuration
 │   └── w2v_baseline.yaml # w2v-BERT configuration
-├── web_dashboard/         # Frontend dashboard
-│   └── templates/         # HTML templates
-├── data/                  # Dataset storage
-├── models/                # Trained checkpoints
-├── demo.sh                # End-to-end capability walkthrough
-├── example.sh             # Sample pipeline runner
-├── run_server.sh          # Launch Python API + Rust web UI
-└── setup.sh               # Environment bootstrapper
+├── static/               # Static web assets
+├── templates/            # HTML templates
+│   └── index.html       # Web dashboard UI
+├── scripts/              # Utility scripts
+│   ├── demo.sh          # End-to-end capability walkthrough
+│   ├── example.sh       # Sample pipeline runner
+│   ├── run_server.sh    # Launch web server
+│   └── setup.sh         # Environment bootstrapper
+├── data/                 # Dataset storage
+└── models/               # Trained checkpoints
 ```
 
 ## 🚀 Quick Start
@@ -67,16 +70,16 @@ mertalizer/
 ./setup.sh
 
 # 2. Download datasets
-python src/data/fetch_datasets.py --all
+python ml/data/fetch_datasets.py --all
 
 # 3. Process data
-python src/data/ingestion.py --all
+python ml/data/ingestion.py --all
 
 # 4. Extract embeddings (repeat for each dataset JSONL)
-python src/data/preprocessing.py --annotations data/processed/ccmusic.jsonl --dataset-name ccmusic
+python ml/data/preprocessing.py --annotations data/processed/ccmusic.jsonl --dataset-name ccmusic
 
 # 5. Train model on precomputed embeddings
-python src/training/train.py --config configs/mert_95m.yaml
+python ml/training/train.py --config configs/mert_95m.yaml
 
 # 6. Start web servers
 ./run_server.sh
@@ -113,13 +116,13 @@ PORT=3000
 ### CLI Inference
 ```bash
 # Single file
-python src/inference/cli.py audio.wav --model models/checkpoints/final_model.ckpt
+python ml/inference/cli.py audio.wav --model models/checkpoints/final_model.ckpt
 
 # Batch processing
-python src/inference/cli.py audio_dir/ --model models/checkpoints/final_model.ckpt --batch
+python ml/inference/cli.py audio_dir/ --model models/checkpoints/final_model.ckpt --batch
 
 # Export results
-python src/inference/cli.py audio.wav --model models/checkpoints/final_model.ckpt --output results.json
+python ml/inference/cli.py audio.wav --model models/checkpoints/final_model.ckpt --output results.json
 ```
 
 ### REST API
@@ -137,10 +140,10 @@ open http://localhost:8000/docs
 ### ONNX Export
 ```bash
 # Export trained model to ONNX
-python src/export/onnx.py --checkpoint models/checkpoints/final_model.ckpt --output models/model.onnx
+python ml/export/onnx.py --checkpoint models/checkpoints/final_model.ckpt --output models/model.onnx
 
 # Test ONNX model
-python src/export/onnx.py --checkpoint models/checkpoints/final_model.ckpt --output models/model.onnx --test
+python ml/export/onnx.py --checkpoint models/checkpoints/final_model.ckpt --output models/model.onnx --test
 ```
 
 ## 🎯 Model Architecture
@@ -177,19 +180,19 @@ python src/export/onnx.py --checkpoint models/checkpoints/final_model.ckpt --out
 ## 🛠️ Development
 
 ### Adding New Datasets
-1. Update `src/data/fetch_datasets.py` with dataset configuration
-2. Implement parser in `src/data/ingestion.py`
-3. Add label mappings in `src/data/ontology.py`
+1. Update `ml/data/fetch_datasets.py` with dataset configuration
+2. Implement parser in `ml/data/ingestion.py`
+3. Add label mappings in `ml/data/ontology.py`
 
 ### Custom Models
-1. Create new model class in `src/modeling/`
-2. Update `src/training/train.py` to support new architecture
+1. Create new model class in `ml/modeling/`
+2. Update `ml/training/train.py` to support new architecture
 3. Add configuration in `configs/`
 
 ### Web Dashboard Features
-1. Modify `web_dashboard/templates/index.html`
-2. Update Rust web server in `rust/web/main.rs`
-3. Add new API endpoints in `src/inference/api.py`
+1. Modify `templates/index.html`
+2. Update Rust web server in `src/main.rs`
+3. Add new API endpoints in `ml/inference/api.py`
 
 ## 📝 Output Format
 

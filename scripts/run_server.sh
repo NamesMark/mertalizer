@@ -19,20 +19,20 @@ if [ -d "venv" ]; then
     source venv/bin/activate
 fi
 
-# Ensure PYTHONPATH includes project src
-export PYTHONPATH=${PYTHONPATH}:$(pwd)/src
+# Ensure PYTHONPATH includes project ml directory
+export PYTHONPATH=${PYTHONPATH}:$(pwd)/ml
 
 # Check if model exists
 if [ ! -f "$MODEL_PATH" ]; then
     echo "⚠️  Model not found at $MODEL_PATH"
     echo "Please train a model first or update MODEL_PATH in .env"
-    echo "To train: python src/training/train.py --config configs/mert_95m.yaml"
+    echo "To train: python ml/training/train.py --config configs/mert_95m.yaml"
     exit 1
 fi
 
 # Start Python API server in background
 echo "🐍 Starting Python API server on port 8000..."
-python src/inference/api.py --model "$MODEL_PATH" --port 8000 &
+python ml/inference/api.py --model "$MODEL_PATH" --port 8000 &
 PYTHON_PID=$!
 
 # Verify API started
@@ -47,10 +47,8 @@ sleep 5
 
 # Start Rust web server
 echo "🦀 Starting Rust web server on port ${PORT:-3000}..."
-cd rust
-cargo run --bin web_server &
+cargo run --bin mertalizer &
 RUST_PID=$!
-cd ..
 
 echo ""
 echo "🎉 Servers started!"

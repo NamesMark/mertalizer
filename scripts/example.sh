@@ -33,7 +33,7 @@ echo "📥 Step 2: Download Datasets"
 echo "----------------------------"
 if [ ! -d "data/raw/harmonix" ]; then
     echo "Downloading Harmonix dataset..."
-    python src/data/fetch_datasets.py --dataset harmonix
+    python ml/data/fetch_datasets.py --dataset harmonix
 else
     echo "✅ Harmonix dataset already downloaded"
 fi
@@ -44,7 +44,7 @@ echo "🔄 Step 3: Process Data"
 echo "-----------------------"
 if [ ! -f "data/processed/combined_annotations.csv" ]; then
     echo "Processing datasets..."
-    python src/data/ingestion.py --all
+    python ml/data/ingestion.py --all
 else
     echo "✅ Data already processed"
 fi
@@ -98,7 +98,7 @@ echo "📤 Step 6: Export to ONNX"
 echo "-------------------------"
 if [ ! -f "models/model.onnx" ]; then
     echo "Exporting model to ONNX..."
-    python src/export/onnx.py --checkpoint models/best_model.ckpt --output models/model.onnx
+    python ml/export/onnx.py --checkpoint models/best_model.ckpt --output models/model.onnx
 else
     echo "✅ ONNX model already exported"
 fi
@@ -123,7 +123,7 @@ print('Test audio file created: test_audio.wav')
 "
 
 # Test CLI
-python src/inference/cli.py test_audio.wav --model models/best_model.ckpt --output test_results.json
+python ml/inference/cli.py test_audio.wav --model models/best_model.ckpt --output test_results.json
 echo "✅ CLI inference test completed"
 
 # Step 8: Start servers

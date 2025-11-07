@@ -123,7 +123,13 @@ impl HistoryStore {
                 match std::fs::read_to_string(&path) {
                     Ok(contents) => match serde_json::from_str::<Value>(&contents) {
                         Ok(value) => {
-                            if let Some(summary) = summarize_history(&value) {
+                            // Extract filename without extension as fallback ID
+                            let filename_id = path
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .map(String::from);
+                            
+                            if let Some(summary) = summarize_history(&value, filename_id) {
                                 summaries.push(summary);
                             }
                         }
@@ -155,14 +161,14 @@ impl HistoryStore {
             .with_context(|| format!("Failed to read {}", history_path.display()))?;
         let mut value: Value = serde_json::from_str(&data).context("Invalid history JSON")?;
 
-        if value.get("audio_url").and_then(|v| v.as_str()).is_none() {
-            if self.audio_file_exists(history_id).await? {
-                value.as_object_mut().map(|obj| {
-                    obj.insert(
-                        "audio_url".into(),
-                        Value::String(format!("/api/history/{history_id}/audio")),
-                    );
-                });
+        if value.get("audio_url").and_then(|v| v.as_str()).is_none()
+            && self.audio_file_exists(history_id).await?
+        {
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert(
+                    "audio_url".into(),
+                    Value::String(format!("/api/history/{history_id}/audio")),
+                );
             }
         }
 
@@ -224,8 +230,6 @@ fn slugify(input: &str) -> String {
         .map(|ch| {
             if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' {
                 ch.to_ascii_lowercase()
-            } else if ch.is_ascii_whitespace() || ch == '-' {
-                '-'
             } else {
                 '-'
             }
@@ -240,8 +244,13 @@ fn slugify(input: &str) -> String {
     }
 }
 
-fn summarize_history(value: &Value) -> Option<HistorySummary> {
-    let history_id = value.get("history_id")?.as_str()?.to_string();
+fn summarize_history(value: &Value, filename_id: Option<String>) -> Option<HistorySummary> {
+    // Try to get history_id from JSON, fallback to filename
+    let history_id = value
+        .get("history_id")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or(filename_id)?;
     let track_id = value
         .get("track_id")
         .and_then(|v| v.as_str())
