@@ -48,6 +48,8 @@ class ModelConfig:
     boundary_loss_weight: float = 1.0
     label_loss_weight: float = 1.0
     focal_gamma: float = 2.0
+    label_focal_gamma: float = 2.0
+    label_smoothing: float = 0.1
 
     # Training settings
     learning_rate: float = 2e-4
@@ -276,6 +278,12 @@ class MusicStructureModel(pl.LightningModule):
         self.boundary_criterion = nn.BCEWithLogitsLoss()
         self.label_criterion = nn.CrossEntropyLoss()
 
+        # Class weights for label loss (set via set_class_weights)
+        self.register_buffer(
+            "label_class_weights",
+            torch.ones(config.num_labels),
+        )
+
     def forward(
         self, embeddings: torch.Tensor, mask: Optional[torch.Tensor] = None
     ) -> Dict[str, torch.Tensor]:
@@ -390,6 +398,10 @@ class MusicStructureModel(pl.LightningModule):
             loss = F.binary_cross_entropy_with_logits(active_logits, active_targets)
         return loss
 
+    def set_class_weights(self, weights: torch.Tensor):
+        """Set class weights for label loss (inverse frequency)."""
+        self.label_class_weights = weights.to(self.device)
+
     def _label_loss(
         self,
         logits: torch.Tensor,
@@ -402,7 +414,32 @@ class MusicStructureModel(pl.LightningModule):
 
         active_logits = logits[valid_mask]
         active_targets = targets[valid_mask]
-        return F.cross_entropy(active_logits, active_targets, ignore_index=-100)
+
+        if self.config.label_focal_gamma > 0:
+            return self._focal_label_loss(active_logits, active_targets)
+
+        return F.cross_entropy(
+            active_logits,
+            active_targets,
+            weight=self.label_class_weights,
+            label_smoothing=self.config.label_smoothing,
+        )
+
+    def _focal_label_loss(
+        self, logits: torch.Tensor, targets: torch.Tensor
+    ) -> torch.Tensor:
+        """Focal loss for multi-class classification with class weights."""
+        ce_loss = F.cross_entropy(
+            logits,
+            targets,
+            weight=self.label_class_weights,
+            label_smoothing=self.config.label_smoothing,
+            reduction="none",
+        )
+        probs = F.softmax(logits, dim=-1)
+        p_t = probs.gather(1, targets.unsqueeze(1)).squeeze(1)
+        focal_weight = (1 - p_t) ** self.config.label_focal_gamma
+        return (focal_weight * ce_loss).mean()
 
     def _focal_loss(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         ce_loss = F.binary_cross_entropy_with_logits(

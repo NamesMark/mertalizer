@@ -33,6 +33,19 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class AugmentationConfig:
+    """Configuration for data augmentation."""
+
+    enabled: bool = False
+    random_crop: bool = True
+    crop_min_ratio: float = 0.5
+    time_stretch: bool = True
+    stretch_range: tuple = (0.85, 1.15)
+    gaussian_noise_std: float = 0.01
+    frame_dropout_rate: float = 0.05
+
+
+@dataclass
 class TrainingConfig:
     """Configuration for training."""
 
@@ -49,6 +62,12 @@ class TrainingConfig:
     learning_rate: float = 2e-4
     weight_decay: float = 0.01
     gradient_clip_val: float = 1.0
+
+    # Augmentation
+    augmentation: AugmentationConfig = None
+
+    # Class weighting
+    use_class_weights: bool = False
 
     # Validation settings
     val_check_interval: float = 0.25
@@ -69,15 +88,26 @@ class TrainingConfig:
     target_sr: int = 22050
     max_audio_length: float = 600.0  # seconds per batch
 
+    def __post_init__(self):
+        if self.augmentation is None:
+            self.augmentation = AugmentationConfig()
+
 
 class MusicStructureDataset(Dataset):
     """Dataset wrapping precomputed SSL embeddings and annotations."""
 
-    def __init__(self, data_file: str, embeddings_dir: str, max_length: float = 600.0):
+    def __init__(
+        self,
+        data_file: str,
+        embeddings_dir: str,
+        max_length: float = 600.0,
+        augmentation: Optional[AugmentationConfig] = None,
+    ):
         self.data_file = str(data_file)
         self.embeddings_dir = Path(embeddings_dir)
         self.max_length = max_length
         self.label_mapper = LabelMapper()
+        self.augmentation = augmentation
 
         if self.data_file.endswith(".jsonl"):
             with open(self.data_file, "r") as f:
@@ -133,6 +163,17 @@ class MusicStructureDataset(Dataset):
         boundary_times = track.get("boundary_times", [])
         boundary_labels = track.get("boundary_labels", [])
 
+        # Apply augmentation before creating targets
+        if self.augmentation and self.augmentation.enabled:
+            embeddings, frame_times, boundary_times, boundary_labels = (
+                self._augment(embeddings, frame_times, boundary_times, boundary_labels, duration)
+            )
+
+        # Ensure frame_times matches embeddings after augmentation
+        n_emb = len(embeddings)
+        if len(frame_times) != n_emb:
+            frame_times = np.linspace(0, duration, num=n_emb, endpoint=False, dtype=np.float32)
+
         boundary_targets = self._create_boundary_targets(boundary_times, frame_times)
         label_targets = self._create_label_targets(
             boundary_times, boundary_labels, frame_times
@@ -147,6 +188,67 @@ class MusicStructureDataset(Dataset):
             "beats": torch.from_numpy(beats).float(),
             "duration": duration,
         }
+
+    def _augment(self, embeddings, frame_times, boundary_times, boundary_labels, duration):
+        """Apply data augmentation to embeddings and annotations."""
+        aug = self.augmentation
+        n_frames = len(embeddings)
+
+        # Random crop: take a random contiguous window
+        if aug.random_crop and n_frames > 10:
+            min_frames = max(10, int(n_frames * aug.crop_min_ratio))
+            crop_len = np.random.randint(min_frames, n_frames + 1)
+            start = np.random.randint(0, n_frames - crop_len + 1)
+            end = start + crop_len
+
+            crop_start_time = frame_times[start]
+            crop_end_time = frame_times[min(end - 1, n_frames - 1)]
+
+            embeddings = embeddings[start:end]
+            frame_times = frame_times[start:end] - crop_start_time
+
+            # Adjust boundaries to crop window
+            new_bt = [0.0]
+            new_bl = []
+            for i, label in enumerate(boundary_labels):
+                bt_start = boundary_times[i]
+                bt_end = boundary_times[i + 1] if i + 1 < len(boundary_times) else duration
+                # Keep boundary if it falls within crop
+                if bt_end > crop_start_time and bt_start < crop_end_time:
+                    adjusted_start = max(0.0, bt_start - crop_start_time)
+                    if adjusted_start > new_bt[-1] + 0.01:
+                        new_bt.append(adjusted_start)
+                    new_bl.append(label)
+            crop_duration = crop_end_time - crop_start_time
+            if not new_bt or new_bt[-1] < crop_duration - 0.01:
+                new_bt.append(crop_duration)
+            boundary_times = new_bt
+            boundary_labels = new_bl
+            duration = crop_duration
+
+        # Time stretch via interpolation
+        if aug.time_stretch and n_frames > 10:
+            lo, hi = aug.stretch_range
+            factor = np.random.uniform(lo, hi)
+            new_len = max(10, int(n_frames * factor))
+            # Interpolate embeddings
+            from scipy.ndimage import zoom
+            zoom_factors = [new_len / n_frames, 1.0]  # stretch time, keep dim
+            embeddings = zoom(embeddings, zoom_factors, order=1).astype(np.float32)
+            frame_times = np.linspace(0, duration, num=new_len, endpoint=False, dtype=np.float32)
+
+        # Gaussian noise on embeddings
+        if aug.gaussian_noise_std > 0:
+            noise = np.random.randn(*embeddings.shape).astype(np.float32) * aug.gaussian_noise_std
+            embeddings = embeddings + noise
+
+        # Random frame dropout
+        if aug.frame_dropout_rate > 0:
+            mask = np.random.random(len(embeddings)) > aug.frame_dropout_rate
+            mask = mask.astype(np.float32)[:, np.newaxis]
+            embeddings = embeddings * mask
+
+        return embeddings, frame_times, boundary_times, boundary_labels
 
     def _create_boundary_targets(
         self, boundary_times: List[float], frame_times: np.ndarray
@@ -216,7 +318,10 @@ class MusicStructureDataModule(pl.LightningDataModule):
 
         if stage == "fit" or stage is None:
             self.train_dataset = MusicStructureDataset(
-                splits_dir / "train.jsonl", embeddings_dir, self.config.max_audio_length
+                splits_dir / "train.jsonl",
+                embeddings_dir,
+                self.config.max_audio_length,
+                augmentation=self.config.augmentation,
             )
             self.val_dataset = MusicStructureDataset(
                 splits_dir / "validation.jsonl",
@@ -326,10 +431,18 @@ def load_config(config_path: str) -> TrainingConfig:
     # Create model config
     model_config = ModelConfig(**config_dict.get("model", {}))
 
+    # Create augmentation config
+    aug_dict = config_dict.pop("augmentation", {})
+    if aug_dict and isinstance(aug_dict.get("stretch_range"), list):
+        aug_dict["stretch_range"] = tuple(aug_dict["stretch_range"])
+    aug_config = AugmentationConfig(**aug_dict) if aug_dict else AugmentationConfig()
+
     # Create training config
+    remaining = {k: v for k, v in config_dict.items() if k != "model"}
     training_config = TrainingConfig(
         model_config=model_config,
-        **{k: v for k, v in config_dict.items() if k != "model"},
+        augmentation=aug_config,
+        **remaining,
     )
 
     return training_config
@@ -384,6 +497,32 @@ def create_logger(config: TrainingConfig) -> Optional[pl.loggers.Logger]:
     return pl.loggers.TensorBoardLogger("logs/")
 
 
+def compute_class_weights(data_file: str, num_labels: int = 8) -> torch.Tensor:
+    """Compute inverse-frequency class weights from training annotations."""
+    label_mapper = LabelMapper()
+    canonical = label_mapper.get_canonical_labels()
+    label_to_idx = {label: i for i, label in enumerate(canonical)}
+
+    counts = np.zeros(num_labels, dtype=np.float64)
+
+    with open(data_file, "r") as f:
+        for line in f:
+            record = json.loads(line)
+            for label in record.get("boundary_labels", []):
+                idx = label_to_idx.get(label, num_labels - 1)
+                counts[idx] += 1
+
+    # Inverse frequency, clamped to avoid huge weights for zero-count classes
+    counts = np.maximum(counts, 1.0)  # avoid div by zero
+    total = counts.sum()
+    weights = total / (num_labels * counts)
+    # Cap maximum weight at 10x the minimum
+    weights = np.clip(weights, weights.min(), weights.min() * 10)
+
+    logger.info("Class weights: %s", dict(zip(canonical, weights.tolist())))
+    return torch.tensor(weights, dtype=torch.float32)
+
+
 def train_model(config: TrainingConfig):
     """Train the music structure recognition model."""
     # Set random seeds
@@ -394,6 +533,15 @@ def train_model(config: TrainingConfig):
 
     # Create model
     model = create_model(config.model_config)
+
+    # Set class weights if enabled
+    if config.use_class_weights:
+        splits_dir = Path(config.data_dir) / "splits"
+        train_file = splits_dir / "train.jsonl"
+        if train_file.exists():
+            weights = compute_class_weights(str(train_file), config.model_config.num_labels)
+            model.set_class_weights(weights)
+            logger.info("Applied class weights to label loss")
 
     # Create callbacks
     callbacks = create_callbacks(config)

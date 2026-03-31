@@ -1,6 +1,8 @@
+mod chat;
 mod history;
 mod predictor;
 
+use crate::chat::{ChatMessage, ChatService};
 use crate::history::{HistoryStore, HistorySummary};
 use crate::predictor::{MusicStructurePredictor, PredictOptions};
 use axum::{
@@ -34,6 +36,18 @@ struct PredictionResponse {
     version: String,
     #[serde(default)]
     beats: Option<Vec<f64>>,
+    #[serde(default)]
+    bpm: Option<f64>,
+    #[serde(default)]
+    key: Option<String>,
+    #[serde(default)]
+    energy_mean: Option<f64>,
+    #[serde(default)]
+    energy_max: Option<f64>,
+    #[serde(default)]
+    brightness: Option<f64>,
+    #[serde(default)]
+    onset_density: Option<f64>,
     #[serde(default)]
     threshold: Option<f64>,
     #[serde(default)]
@@ -75,6 +89,7 @@ struct ErrorResponse {
 struct AppState {
     predictor: Arc<MusicStructurePredictor>,
     history: Arc<HistoryStore>,
+    chat: Arc<ChatService>,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -167,9 +182,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?);
 
     let history_dir = project_root.join("data").join("history");
-    let history = Arc::new(HistoryStore::new(history_dir));
+    let history = Arc::new(HistoryStore::new(history_dir.clone()));
+    let chat = Arc::new(ChatService::new(history_dir));
 
-    let state = AppState { predictor, history };
+    let state = AppState {
+        predictor,
+        history,
+        chat,
+    };
 
     let app = Router::new()
         .route("/", get(index_handler))
@@ -179,6 +199,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/history/:id/audio", get(history_audio_handler))
         .route("/api/predict", post(predict_handler))
         .route("/api/upload", post(upload_handler))
+        .route("/api/chat/:id", get(chat_history_handler))
+        .route("/api/chat/:id", post(chat_send_handler))
+        .route("/api/chat/:id", axum::routing::delete(chat_delete_handler))
         .nest_service("/static", ServeDir::new("static"))
         .layer(CorsLayer::permissive())
         .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
@@ -494,6 +517,119 @@ async fn history_audio_handler(
     );
 
     Ok(response)
+}
+
+// ---- Chat endpoints ----
+
+#[derive(Debug, Deserialize)]
+struct ChatRequest {
+    message: String,
+}
+
+async fn chat_history_handler(
+    State(state): State<AppState>,
+    AxumPath(history_id): AxumPath<String>,
+) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+    let messages = state.chat.load_chat(&history_id).await.map_err(|e| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to load chat",
+            Some(e.to_string()),
+        )
+    })?;
+
+    Ok(Json(json!({
+        "history_id": history_id,
+        "messages": messages,
+    })))
+}
+
+async fn chat_send_handler(
+    State(state): State<AppState>,
+    AxumPath(history_id): AxumPath<String>,
+    Json(request): Json<ChatRequest>,
+) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    if !state.chat.is_available() {
+        return Err(error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Chat unavailable — set ANTHROPIC_API_KEY",
+            None,
+        ));
+    }
+
+    // Load the analysis for context
+    let analysis = state.history.load(&history_id).await.map_err(|e| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to load analysis",
+            Some(e.to_string()),
+        )
+    })?;
+
+    let analysis = match analysis {
+        Some(a) => a,
+        None => {
+            return Err(error_response(
+                StatusCode::NOT_FOUND,
+                "Analysis not found",
+                None,
+            ))
+        }
+    };
+
+    // Create a channel for streaming
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(100);
+
+    let chat = state.chat.clone();
+    let hid = history_id.clone();
+    let msg = request.message.clone();
+
+    // Spawn the LLM call in background
+    tokio::spawn(async move {
+        if let Err(e) = chat.send_message(&hid, &msg, &analysis, tx).await {
+            error!("Chat error: {}", e);
+        }
+    });
+
+    // Stream SSE response
+    let stream = async_stream::stream! {
+        while let Some(chunk) = rx.recv().await {
+            let data = serde_json::json!({"type": "text", "content": chunk});
+            yield Ok::<_, std::convert::Infallible>(
+                format!("data: {}\n\n", data)
+            );
+        }
+        let done = serde_json::json!({"type": "done", "content": ""});
+        yield Ok(format!("data: {}\n\n", done));
+    };
+
+    let body = Body::from_stream(stream);
+    let mut response = Response::new(body);
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream"),
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-cache"),
+    );
+
+    Ok(response)
+}
+
+async fn chat_delete_handler(
+    State(state): State<AppState>,
+    AxumPath(history_id): AxumPath<String>,
+) -> Result<Json<Value>, (StatusCode, Json<ErrorResponse>)> {
+    state.chat.delete_chat(&history_id).await.map_err(|e| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to delete chat",
+            Some(e.to_string()),
+        )
+    })?;
+
+    Ok(Json(json!({"status": "deleted"})))
 }
 
 fn error_response(

@@ -1,0 +1,64 @@
+# Model configuration - v2 with larger receptive field and class balancing
+model:
+  encoder_model: "mert"
+  encoder_frozen: true
+  encoder_lr: 1e-5
+  boundary_head_type: "tcn"
+  boundary_hidden_dim: 256
+  boundary_num_layers: 6        # was 4 → more layers for larger receptive field
+  boundary_dropout: 0.15        # was 0.1 → slightly more regularization
+  boundary_kernel_size: 15      # was 3 → much larger kernel for section-level context
+  boundary_dilation_base: 3     # was 2 → wider dilation for exponential growth
+  transformer_num_heads: 8
+  transformer_num_layers: 2
+  label_hidden_dim: 128
+  num_labels: 8
+  boundary_loss_weight: 1.0
+  label_loss_weight: 1.0
+  focal_gamma: 2.0
+  label_focal_gamma: 2.0       # NEW: focal loss for labels too
+  label_smoothing: 0.1         # NEW: label smoothing
+  learning_rate: 0.0002
+  weight_decay: 0.01
+  embedding_dim: 768
+
+# Data settings
+data_dir: "data/processed"
+batch_size: 4                   # was 8 → smaller batch, longer sequences fit better
+max_epochs: 150                 # was 100 → more epochs with augmentation
+num_workers: 4
+
+# Training settings
+learning_rate: 0.0002
+weight_decay: 0.01
+gradient_clip_val: 1.0
+
+# Augmentation (NEW)
+augmentation:
+  enabled: true
+  random_crop: true
+  crop_min_ratio: 0.5           # crop to 50-100% of track length
+  time_stretch: true
+  stretch_range: [0.85, 1.15]   # 85% to 115% speed
+  gaussian_noise_std: 0.01
+  frame_dropout_rate: 0.05
+
+# Class weighting (NEW)
+use_class_weights: true
+
+# Validation settings
+val_check_interval: 0.25
+early_stopping_patience: 15     # was 10 → more patience with augmentation
+
+# Logging settings
+use_wandb: false                # disabled for now
+project_name: "mertalizer"
+experiment_name: "mert-95m-tcn-v2"
+
+# Checkpoint settings
+checkpoint_dir: "models/checkpoints"
+save_top_k: 3
+
+# Audio settings
+target_sr: 22050
+max_audio_length: 600.0

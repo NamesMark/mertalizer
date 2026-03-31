@@ -29,6 +29,13 @@ mime_guess = "2.0"
 
 # Async utilities
 tokio-util = "0.7"
+futures-util = "0.3"
+
+# HTTP client (for LLM API)
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# Streaming
+async-stream = "0.3"
 
 # Utilities
 anyhow = "1.0"
@@ -43,3 +50,7 @@ walkdir = "2.4"
 [[bin]]
 name = "mertalizer"
 path = "src/main.rs"
+
+[[bin]]
+name = "verify"
+path = "src/bin/verify.rs"

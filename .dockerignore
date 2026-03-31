@@ -1,0 +1,14 @@
+target/
+venv/
+.git/
+__pycache__/
+*.pyc
+data/raw/
+data/processed/
+data/splits/
+logs/
+nohup.out
+test.wav
+.env
+.claude/
+ml/verification/
