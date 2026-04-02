@@ -60,7 +60,8 @@ echo "  - Focal loss on labels + class weights"
 echo "  - Data augmentation: crop, stretch, noise, dropout"
 echo ""
 
-PYTHONPATH=ml DATA_DIR="${DATA_DIR}" python3 ml/training/train.py --config configs/mert_95m_v2.yaml --data-dir "${DATA_DIR}"
+export PYTHONPATH="$(pwd)/ml:${PYTHONPATH}"
+python3 ml/training/train.py --config configs/mert_95m_v2.yaml --data-dir "${DATA_DIR}"
 
 echo ""
 echo "=== Training complete ==="
