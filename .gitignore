@@ -14,7 +14,7 @@ venv/
 .env
 
 # Generated datasets and embeddings
-data/
+/data/
 uploads/
 
 # Model checkpoints and exported artifacts
