@@ -577,6 +577,7 @@ def main():
     )
     parser.add_argument("--config", required=True, help="Path to config YAML file")
     parser.add_argument("--resume", help="Path to checkpoint to resume from")
+    parser.add_argument("--data-dir", help="Override data directory path")
     parser.add_argument("--test-only", action="store_true", help="Only run testing")
 
     args = parser.parse_args()
@@ -586,6 +587,9 @@ def main():
 
     # Load configuration
     config = load_config(args.config)
+
+    if args.data_dir:
+        config.data_dir = args.data_dir
 
     # Create checkpoint directory
     Path(config.checkpoint_dir).mkdir(parents=True, exist_ok=True)
