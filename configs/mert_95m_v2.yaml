@@ -1,31 +1,31 @@
-# Model configuration - v2 with larger receptive field and class balancing
+# Model configuration - v2: larger TCN only, conservative label training
 model:
   encoder_model: "mert"
   encoder_frozen: true
   encoder_lr: 1e-5
   boundary_head_type: "tcn"
   boundary_hidden_dim: 256
-  boundary_num_layers: 6        # was 4 → more layers for larger receptive field
-  boundary_dropout: 0.15        # was 0.1 → slightly more regularization
-  boundary_kernel_size: 15      # was 3 → much larger kernel for section-level context
-  boundary_dilation_base: 3     # was 2 → wider dilation for exponential growth
+  boundary_num_layers: 6        # was 4 → larger receptive field (WORKS)
+  boundary_dropout: 0.1
+  boundary_kernel_size: 15      # was 3 → section-level context (WORKS)
+  boundary_dilation_base: 3     # was 2 → wider (WORKS)
   transformer_num_heads: 8
   transformer_num_layers: 2
   label_hidden_dim: 128
   num_labels: 8
   boundary_loss_weight: 1.0
-  label_loss_weight: 1.0
+  label_loss_weight: 1.0        # back to 1.0
   focal_gamma: 2.0
-  label_focal_gamma: 2.0       # NEW: focal loss for labels too
-  label_smoothing: 0.1         # NEW: label smoothing
+  label_focal_gamma: 0.0        # disabled
+  label_smoothing: 0.0          # disabled
   learning_rate: 0.0002
   weight_decay: 0.01
   embedding_dim: 768
 
 # Data settings
 data_dir: "data/processed"
-batch_size: 4                   # was 8 → smaller batch, longer sequences fit better
-max_epochs: 150                 # was 100 → more epochs with augmentation
+batch_size: 4
+max_epochs: 150
 num_workers: 4
 
 # Training settings
@@ -33,27 +33,21 @@ learning_rate: 0.0002
 weight_decay: 0.01
 gradient_clip_val: 1.0
 
-# Augmentation (NEW)
+# Augmentation DISABLED for debugging
 augmentation:
-  enabled: true
-  random_crop: true
-  crop_min_ratio: 0.5           # crop to 50-100% of track length
-  time_stretch: true
-  stretch_range: [0.85, 1.15]   # 85% to 115% speed
-  gaussian_noise_std: 0.01
-  frame_dropout_rate: 0.05
+  enabled: false
 
-# Class weighting (NEW)
-use_class_weights: true
+# Class weighting DISABLED for debugging
+use_class_weights: false
 
 # Validation settings
 val_check_interval: 0.25
-early_stopping_patience: 15     # was 10 → more patience with augmentation
+early_stopping_patience: 25
 
 # Logging settings
-use_wandb: false                # disabled for now
+use_wandb: false
 project_name: "mertalizer"
-experiment_name: "mert-95m-tcn-v2"
+experiment_name: "mert-95m-tcn-v2-debug"
 
 # Checkpoint settings
 checkpoint_dir: "models/checkpoints"
