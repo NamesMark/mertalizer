@@ -546,14 +546,14 @@ def train_model(config: TrainingConfig):
     # Create callbacks
     callbacks = create_callbacks(config)
 
-    # Create logger
-    logger = create_logger(config)
+    # Create PL logger
+    pl_logger = create_logger(config)
 
     # Create trainer
     trainer = pl.Trainer(
         max_epochs=config.max_epochs,
         callbacks=callbacks,
-        logger=logger,
+        logger=pl_logger,
         gradient_clip_val=config.gradient_clip_val,
         val_check_interval=config.val_check_interval,
         accelerator="auto",
