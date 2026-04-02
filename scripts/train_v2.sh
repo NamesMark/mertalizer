@@ -13,12 +13,12 @@ cd "$(dirname "$0")/.."
 echo "=== Mertalizer v2 Training ==="
 echo ""
 
-# --- Setup ---
-if [ ! -d "venv" ]; then
-    echo "Creating virtual environment..."
-    python3 -m venv venv
-fi
-source venv/bin/activate
+# # --- Setup ---
+# if [ ! -d "venv" ]; then
+#     echo "Creating virtual environment..."
+#     python3 -m venv venv
+# fi
+# source venv/bin/activate
 
 echo "Installing dependencies..."
 pip install -q torch torchaudio pytorch-lightning transformers \
@@ -30,21 +30,26 @@ python3 -c "
 import torch
 if torch.cuda.is_available():
     print(f'GPU: {torch.cuda.get_device_name(0)}')
-    print(f'VRAM: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f} GB')
+    print(f'VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB')
 else:
     print('WARNING: No GPU detected. Training will be very slow.')
     print('On Lightning.ai: switch your Studio to GPU mode.')
 "
 
+# --- Storage path (override with TRAINING_STORAGE env var) ---
+TRAINING_STORAGE="${TRAINING_STORAGE:-/teamspace/lightning_storage/mert-training-set}"
+DATA_DIR="${TRAINING_STORAGE}"
+echo "Data dir: ${DATA_DIR}"
+
 # --- Verify data ---
-if [ ! -f "data/processed/splits/train.jsonl" ]; then
-    echo "ERROR: Training data not found at data/processed/splits/"
-    echo "Make sure the ccmusic embeddings are available."
+if [ ! -f "${DATA_DIR}/splits/train.jsonl" ]; then
+    echo "ERROR: Training data not found at ${DATA_DIR}/splits/"
+    echo "Set TRAINING_STORAGE to your data root."
     exit 1
 fi
 
-TRAIN_TRACKS=$(wc -l < data/processed/splits/train.jsonl)
-VAL_TRACKS=$(wc -l < data/processed/splits/validation.jsonl)
+TRAIN_TRACKS=$(wc -l < "${DATA_DIR}/splits/train.jsonl")
+VAL_TRACKS=$(wc -l < "${DATA_DIR}/splits/validation.jsonl")
 echo "Data: ${TRAIN_TRACKS} train / ${VAL_TRACKS} val tracks"
 
 # --- Train ---
@@ -55,7 +60,7 @@ echo "  - Focal loss on labels + class weights"
 echo "  - Data augmentation: crop, stretch, noise, dropout"
 echo ""
 
-PYTHONPATH=ml python3 ml/training/train.py --config configs/mert_95m_v2.yaml
+PYTHONPATH=ml DATA_DIR="${DATA_DIR}" python3 ml/training/train.py --config configs/mert_95m_v2.yaml --data-dir "${DATA_DIR}"
 
 echo ""
 echo "=== Training complete ==="
