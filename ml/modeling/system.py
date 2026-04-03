@@ -220,12 +220,25 @@ class TransformerBoundaryHead(nn.Module):
 
 
 class LabelHead(nn.Module):
-    """Linear label classification head."""
+    """BiLSTM + linear label classification head.
+
+    The BiLSTM gives each frame full temporal context of the song,
+    so label predictions are informed by surrounding sections.
+    """
 
     def __init__(self, input_dim: int, hidden_dim: int, num_labels: int):
         super().__init__()
+        self.lstm = nn.LSTM(
+            input_size=input_dim,
+            hidden_size=hidden_dim,
+            num_layers=2,
+            batch_first=True,
+            bidirectional=True,
+            dropout=0.1,
+        )
+        # BiLSTM outputs 2 * hidden_dim
         self.classifier = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
+            nn.Linear(hidden_dim * 2, hidden_dim),
             nn.ReLU(),
             nn.Dropout(0.1),
             nn.Linear(hidden_dim, num_labels),
@@ -233,7 +246,8 @@ class LabelHead(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: (batch, seq_len, input_dim)
-        return self.classifier(x)  # (batch, seq_len, num_labels)
+        lstm_out, _ = self.lstm(x)  # (batch, seq_len, hidden_dim * 2)
+        return self.classifier(lstm_out)  # (batch, seq_len, num_labels)
 
 
 class MusicStructureModel(pl.LightningModule):
