@@ -16,17 +16,18 @@ echo "=== Preparing Harmonix Dataset ==="
 # --- Install deps ---
 pip install -q huggingface_hub torch torchaudio transformers librosa soundfile numpy 2>&1 | tail -3
 
-# --- Download BigVGAN audio ---
-echo "Downloading Harmonix BigVGAN audio (~8.5GB)..."
+# --- Download annotations + BigVGAN audio ---
+echo "Downloading Harmonix annotations and BigVGAN audio (~8.5GB)..."
 python3 -c "
 from huggingface_hub import hf_hub_download
-path = hf_hub_download(
-    repo_id='m-a-p/harmonixset_bigvgan',
-    filename='harmonixset_bigvgan.zip',
-    repo_type='dataset',
-    local_dir='data/raw/harmonix',
-)
-print(f'Downloaded: {path}')
+for fname in ['harmonixset.corrected.20250821.jsonl', 'harmonixset_bigvgan.zip']:
+    path = hf_hub_download(
+        repo_id='m-a-p/harmonixset_bigvgan',
+        filename=fname,
+        repo_type='dataset',
+        local_dir='data/raw/harmonix',
+    )
+    print(f'Downloaded: {path}')
 "
 
 echo "Extracting audio..."
